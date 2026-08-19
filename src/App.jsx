@@ -27,6 +27,7 @@ export default function App() {
   const [apps, setApps] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [auditLog, setAuditLog] = useState([]);
+  const [deptDefaults, setDeptDefaults] = useState({});
   const [ready, setReady] = useState(false);
   const [session, setSession] = useState(null);
   const [authReady, setAuthReady] = useState(false);
@@ -43,6 +44,10 @@ export default function App() {
   const [editingEmployeeInfo, setEditingEmployeeInfo] = useState(null);
   const [managingDepartments, setManagingDepartments] = useState(false);
   const [editingAppLevels, setEditingAppLevels] = useState(null);
+  const [editingDeptDefaults, setEditingDeptDefaults] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [confirmBulkOffboard, setConfirmBulkOffboard] = useState(false);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
   const [theme, setTheme] = useState("light");
   const [toast, setToast] = useState(null);
 
@@ -69,27 +74,35 @@ export default function App() {
   }, []);
 
   const fetchAll = useCallback(async () => {
-    const [{ data: appsData }, { data: employeesData }, { data: permsData }, { data: logData }] = await Promise.all([
+    const [{ data: appsData }, { data: employeesData }, { data: permsData }, { data: logData }, { data: deptDefData }] = await Promise.all([
       supabase.from("apps").select("*").order("name"),
       supabase.from("employees").select("*").order("name"),
       supabase.from("permissions").select("*"),
       supabase.from("audit_log").select("*").order("ts", { ascending: false }).limit(500),
+      supabase.from("department_defaults").select("*"),
     ]);
     const nextApps = (appsData || []).map((a) => ({ id: a.id, name: a.name, owner: a.owner || "Unassigned", levels: (a.levels && a.levels.length ? a.levels : ["Admin", "User"]) }));
     const permsByEmp = {};
     (permsData || []).forEach((p) => {
       if (!permsByEmp[p.employee_id]) permsByEmp[p.employee_id] = [];
-      permsByEmp[p.employee_id].push({ appId: p.app_id, level: p.level, _permId: p.id });
+      permsByEmp[p.employee_id].push({ appId: p.app_id, level: p.level, notes: p.notes || "", _permId: p.id });
     });
     const nextEmployees = (employeesData || []).map((e) => ({
       id: e.id, name: e.name, email: e.email || "", department: e.department || "Unassigned", status: e.status,
       offboardedAt: e.offboarded_at, offboardReason: e.offboard_reason, google2fa: !!e.google_2fa_enabled,
+      location: e.location || "",
       permissions: permsByEmp[e.id] || [],
     }));
     const nextLog = (logData || []).map((l) => ({ id: l.id, ts: nowStamp(l.ts), actor: l.actor, action: l.action, detail: l.detail }));
+    const nextDeptDefaults = {};
+    (deptDefData || []).forEach((d) => {
+      if (!nextDeptDefaults[d.department]) nextDeptDefaults[d.department] = [];
+      nextDeptDefaults[d.department].push({ appId: d.app_id, level: d.level });
+    });
     setApps(nextApps);
     setEmployees(nextEmployees);
     setAuditLog(nextLog);
+    setDeptDefaults(nextDeptDefaults);
     setReady(true);
   }, []);
 
@@ -143,11 +156,11 @@ export default function App() {
     return counts;
   }, [employees]);
 
-  async function handleAddEmployee(name, department, email, google2fa) {
-    const { data, error } = await supabase.from("employees").insert({ name, department: department || "Unassigned", status: "active", email: email || null, google_2fa_enabled: !!google2fa }).select().single();
+  async function handleAddEmployee(name, department, email, google2fa, location) {
+    const { data, error } = await supabase.from("employees").insert({ name, department: department || "Unassigned", status: "active", email: email || null, google_2fa_enabled: !!google2fa, location: location || null }).select().single();
     if (error) { showToast("Error adding employee"); return; }
-    setEmployees((prev) => [...prev, { id: data.id, name: data.name, email: data.email || "", department: data.department, status: data.status, google2fa: !!data.google_2fa_enabled, permissions: [] }]);
-    await logAudit("Employee added", `Added ${name} (${department || "Unassigned"})${email ? ` — ${email}` : ""}. 2FA: ${google2fa ? "enabled" : "not enabled"}.`);
+    setEmployees((prev) => [...prev, { id: data.id, name: data.name, email: data.email || "", department: data.department, status: data.status, google2fa: !!data.google_2fa_enabled, location: data.location || "", permissions: [] }]);
+    await logAudit("Employee added", `Added ${name} (${department || "Unassigned"})${email ? ` — ${email}` : ""}${location ? `, location: ${location}` : ""}. 2FA: ${google2fa ? "enabled" : "not enabled"}.`);
     setAddingEmployee(false);
     showToast(`${name} added`);
   }
@@ -158,12 +171,12 @@ export default function App() {
     const newByApp = Object.fromEntries(newPermissions.map((p) => [p.appId, p]));
     const toInsert = newPermissions.filter((p) => !oldByApp[p.appId]);
     const toDelete = emp.permissions.filter((p) => !newByApp[p.appId]);
-    const toUpdate = newPermissions.filter((p) => oldByApp[p.appId] && oldByApp[p.appId].level !== p.level);
+    const toUpdate = newPermissions.filter((p) => oldByApp[p.appId] && (oldByApp[p.appId].level !== p.level || (oldByApp[p.appId].notes || "") !== (p.notes || "")));
 
-    if (toInsert.length) await supabase.from("permissions").insert(toInsert.map((p) => ({ employee_id: empId, app_id: p.appId, level: p.level })));
+    if (toInsert.length) await supabase.from("permissions").insert(toInsert.map((p) => ({ employee_id: empId, app_id: p.appId, level: p.level, notes: p.notes || null })));
     if (toDelete.length) await supabase.from("permissions").delete().in("id", toDelete.map((p) => p._permId));
     for (const p of toUpdate) {
-      await supabase.from("permissions").update({ level: p.level }).eq("id", oldByApp[p.appId]._permId);
+      await supabase.from("permissions").update({ level: p.level, notes: p.notes || null }).eq("id", oldByApp[p.appId]._permId);
     }
     await fetchAll();
     await logAudit("Permission change", `${emp.name}: ${changeNote}`);
@@ -197,19 +210,81 @@ export default function App() {
     showToast(`${emp.name} permanently deleted`);
   }
 
-  async function handleEditEmployeeInfo(empId, name, department, email, google2fa) {
+  async function handleEditEmployeeInfo(empId, name, department, email, google2fa, location) {
     const emp = employees.find((e) => e.id === empId);
     const changes = [];
     if (name !== emp.name) changes.push(`name: "${emp.name}" → "${name}"`);
     if (department !== emp.department) changes.push(`department: "${emp.department}" → "${department}"`);
     if ((email || "") !== (emp.email || "")) changes.push(`email: "${emp.email || "—"}" → "${email || "—"}"`);
+    if ((location || "") !== (emp.location || "")) changes.push(`location: "${emp.location || "—"}" → "${location || "—"}"`);
     if (!!google2fa !== !!emp.google2fa) changes.push(`Google 2FA: ${emp.google2fa ? "enabled" : "not enabled"} → ${google2fa ? "enabled" : "not enabled"}`);
     if (!changes.length) { setEditingEmployeeInfo(null); return; }
-    await supabase.from("employees").update({ name, department, email: email || null, google_2fa_enabled: !!google2fa }).eq("id", empId);
-    setEmployees((prev) => prev.map((e) => (e.id === empId ? { ...e, name, department, email, google2fa: !!google2fa } : e)));
+    await supabase.from("employees").update({ name, department, email: email || null, google_2fa_enabled: !!google2fa, location: location || null }).eq("id", empId);
+    setEmployees((prev) => prev.map((e) => (e.id === empId ? { ...e, name, department, email, google2fa: !!google2fa, location } : e)));
     await logAudit("Employee info updated", `${emp.name}: ${changes.join(", ")}`);
     setEditingEmployeeInfo(null);
     showToast("Employee updated");
+  }
+
+  function toggleSelected(id) {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+  function toggleSelectAll(ids) {
+    setSelectedIds((prev) => (ids.every((id) => prev.includes(id)) ? prev.filter((id) => !ids.includes(id)) : Array.from(new Set([...prev, ...ids]))));
+  }
+
+  async function handleBulkOffboard(reason) {
+    const targets = employees.filter((e) => selectedIds.includes(e.id) && e.status === "active");
+    for (const emp of targets) {
+      await supabase.from("permissions").delete().eq("employee_id", emp.id);
+      await supabase.from("employees").update({ status: "offboarded", offboarded_at: new Date().toISOString(), offboard_reason: reason || null }).eq("id", emp.id);
+    }
+    await fetchAll();
+    await logAudit("Bulk offboard", `Offboarded ${targets.length} employee(s)${reason ? ` (reason: ${reason})` : ""}: ${targets.map((e) => e.name).join(", ")}.`);
+    setConfirmBulkOffboard(false);
+    setSelectedIds([]);
+    showToast(`${targets.length} employee(s) offboarded`);
+  }
+
+  async function handleBulkDelete() {
+    const targets = employees.filter((e) => selectedIds.includes(e.id));
+    for (const emp of targets) {
+      await supabase.from("employees").delete().eq("id", emp.id);
+    }
+    setEmployees((prev) => prev.filter((e) => !selectedIds.includes(e.id)));
+    await logAudit("Bulk permanent deletion", `${targets.length} employee(s) permanently deleted by ${session?.user?.email || "a user"}: ${targets.map((e) => e.name).join(", ")}. Only this log entry remains.`);
+    setConfirmBulkDelete(false);
+    setSelectedIds([]);
+    showToast(`${targets.length} employee(s) permanently deleted`);
+  }
+
+  async function handleApplyDeptDefaultsBulk() {
+    const targets = employees.filter((e) => selectedIds.includes(e.id) && e.status === "active");
+    let totalGrants = 0;
+    for (const emp of targets) {
+      const defaults = deptDefaults[emp.department] || [];
+      const existingAppIds = new Set(emp.permissions.map((p) => p.appId));
+      const toInsert = defaults.filter((d) => !existingAppIds.has(d.appId));
+      if (toInsert.length) {
+        await supabase.from("permissions").insert(toInsert.map((d) => ({ employee_id: emp.id, app_id: d.appId, level: d.level })));
+        totalGrants += toInsert.length;
+      }
+    }
+    await fetchAll();
+    await logAudit("Applied department defaults", `Applied department default access to ${targets.length} employee(s), granting ${totalGrants} new access(es) total.`);
+    setSelectedIds([]);
+    showToast(`Defaults applied to ${targets.length} employee(s)`);
+  }
+
+  async function handleSaveDeptDefaults(department, list) {
+    await supabase.from("department_defaults").delete().eq("department", department);
+    if (list.length) {
+      await supabase.from("department_defaults").insert(list.map((d) => ({ department, app_id: d.appId, level: d.level })));
+    }
+    await fetchAll();
+    await logAudit("Department defaults updated", `${department}: set to [${list.map((d) => `${appById[d.appId]?.name || d.appId} (${d.level})`).join(", ") || "none"}].`);
+    setEditingDeptDefaults(null);
+    showToast(`${department} defaults saved`);
   }
 
   async function handleRenameDepartments(renames) {
@@ -593,11 +668,28 @@ export default function App() {
 
       {tab === "employees" && (
         <div className="fv-card">
+          {selectedIds.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "var(--gold-soft)", borderBottom: "1px solid var(--hairline)" }}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: "var(--gold-soft-text)" }}>{selectedIds.length} selected</span>
+              <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={handleApplyDeptDefaultsBulk}><ListPlus size={12} />Apply department defaults</button>
+              <button className="fv-btn fv-btn-danger fv-btn-sm" onClick={() => setConfirmBulkOffboard(true)}><UserMinus size={12} />Offboard selected</button>
+              <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={() => setConfirmBulkDelete(true)} style={{ color: "var(--danger)", borderColor: "var(--danger-soft)" }}><Trash2 size={12} />Delete selected</button>
+              <button className="fv-btn fv-btn-ghost fv-btn-sm" style={{ marginLeft: "auto" }} onClick={() => setSelectedIds([])}>Clear selection</button>
+            </div>
+          )}
           <table className="fv-list-table">
             <thead>
               <tr>
+                <th style={{ width: 36 }}>
+                  <input
+                    type="checkbox"
+                    checked={filteredEmployees.length > 0 && filteredEmployees.every((e) => selectedIds.includes(e.id))}
+                    onChange={() => toggleSelectAll(filteredEmployees.map((e) => e.id))}
+                  />
+                </th>
                 <th>Employee</th>
                 <th>Department</th>
+                <th>Location</th>
                 <th>Status</th>
                 <th>Active grants</th>
                 <th>Actions</th>
@@ -605,9 +697,12 @@ export default function App() {
             </thead>
             <tbody>
               {filteredEmployees.length === 0 ? (
-                <tr><td colSpan={5} className="fv-empty">No employees match this filter.</td></tr>
+                <tr><td colSpan={7} className="fv-empty">No employees match this filter.</td></tr>
               ) : filteredEmployees.map((e) => (
                 <tr key={e.id}>
+                  <td>
+                    <input type="checkbox" checked={selectedIds.includes(e.id)} onChange={() => toggleSelected(e.id)} />
+                  </td>
                   <td>
                     <div style={{ fontWeight: 600 }}>{e.name}</div>
                     {e.email && <div style={{ fontSize: 11.5, color: "var(--text-dim)", fontFamily: "'JetBrains Mono', monospace" }}>{e.email}</div>}
@@ -617,6 +712,7 @@ export default function App() {
                     </div>
                   </td>
                   <td>{e.department}</td>
+                  <td>{e.location || "—"}</td>
                   <td>
                     <span className={`status-pill ${e.status === "active" ? "status-active" : "status-offboarded"}`}>
                       {e.status === "active" ? <Check size={11} /> : <X size={11} />}
@@ -721,7 +817,7 @@ export default function App() {
           employee={employees.find((e) => e.id === editingEmployeeInfo)}
           departments={departments.filter((d) => d !== "All")}
           onClose={() => setEditingEmployeeInfo(null)}
-          onSave={(name, department, email, google2fa) => handleEditEmployeeInfo(editingEmployeeInfo, name, department, email, google2fa)}
+          onSave={(name, department, email, google2fa, location) => handleEditEmployeeInfo(editingEmployeeInfo, name, department, email, google2fa, location)}
         />
       )}
 
@@ -767,6 +863,7 @@ export default function App() {
           departments={departments.filter((d) => d !== "All")}
           onClose={() => setManagingDepartments(false)}
           onSave={handleRenameDepartments}
+          onEditDefaults={(d) => { setManagingDepartments(false); setEditingDeptDefaults(d); }}
         />
       )}
 
@@ -775,6 +872,32 @@ export default function App() {
           app={apps.find((a) => a.id === editingAppLevels)}
           onClose={() => setEditingAppLevels(null)}
           onSave={(levels) => handleUpdateAppLevels(editingAppLevels, levels)}
+        />
+      )}
+
+      {editingDeptDefaults && (
+        <DeptDefaultsModal
+          department={editingDeptDefaults}
+          apps={apps}
+          current={deptDefaults[editingDeptDefaults] || []}
+          onClose={() => setEditingDeptDefaults(null)}
+          onSave={(list) => handleSaveDeptDefaults(editingDeptDefaults, list)}
+        />
+      )}
+
+      {confirmBulkOffboard && (
+        <BulkOffboardModal
+          count={employees.filter((e) => selectedIds.includes(e.id) && e.status === "active").length}
+          onClose={() => setConfirmBulkOffboard(false)}
+          onConfirm={handleBulkOffboard}
+        />
+      )}
+
+      {confirmBulkDelete && (
+        <BulkDeleteModal
+          names={employees.filter((e) => selectedIds.includes(e.id)).map((e) => e.name)}
+          onClose={() => setConfirmBulkDelete(false)}
+          onConfirm={handleBulkDelete}
         />
       )}
 
@@ -787,6 +910,7 @@ function EditPermissionsModal({ employee, apps, onClose, onSave }) {
   const [perms, setPerms] = useState(employee.permissions.map((p) => ({ ...p })));
   const [newAppId, setNewAppId] = useState(apps[0]?.id || "");
   const [newLevel, setNewLevel] = useState("");
+  const [newNotes, setNewNotes] = useState("");
   const [changes, setChanges] = useState([]);
 
   const appById = Object.fromEntries(apps.map((a) => [a.id, a]));
@@ -802,9 +926,10 @@ function EditPermissionsModal({ employee, apps, onClose, onSave }) {
 
   function addPerm() {
     if (!newAppId) return;
-    setPerms([...perms, { appId: newAppId, level: effectiveNewLevel }]);
-    setChanges([...changes, `+ ${appById[newAppId]?.name} → ${effectiveNewLevel}`]);
+    setPerms([...perms, { appId: newAppId, level: effectiveNewLevel, notes: newNotes.trim() }]);
+    setChanges([...changes, `+ ${appById[newAppId]?.name} → ${effectiveNewLevel}${newNotes.trim() ? ` (${newNotes.trim()})` : ""}`]);
     setNewLevel("");
+    setNewNotes("");
   }
   function removePerm(appId) {
     const p = perms.find((x) => x.appId === appId);
@@ -815,6 +940,9 @@ function EditPermissionsModal({ employee, apps, onClose, onSave }) {
     const old = perms.find((p) => p.appId === appId)?.level;
     setPerms(perms.map((p) => (p.appId === appId ? { ...p, level } : p)));
     setChanges([...changes, `${appById[appId]?.name}: ${old} → ${level}`]);
+  }
+  function changeNotes(appId, notes) {
+    setPerms(perms.map((p) => (p.appId === appId ? { ...p, notes } : p)));
   }
   function handleSave() {
     const note = changes.length ? changes.join("; ") : "No changes to access.";
@@ -828,17 +956,26 @@ function EditPermissionsModal({ employee, apps, onClose, onSave }) {
         <div className="fv-modal-sub">{employee.department} · {perms.length} active grant(s)</div>
 
         {perms.map((p) => (
-          <div className="fv-perm-row" key={p.appId}>
-            <span className="fv-perm-app">{appById[p.appId]?.name || p.appId}</span>
-            <select
-              className="fv-select"
-              value={p.level}
-              onChange={(e) => changeLevel(p.appId, e.target.value)}
-              style={{ width: 160 }}
-            >
-              {levelOptionsFor(p.appId, p.level).map((l) => <option key={l} value={l}>{l}</option>)}
-            </select>
-            <button className="fv-btn fv-btn-danger fv-btn-sm" onClick={() => removePerm(p.appId)}><X size={12} />Revoke</button>
+          <div key={p.appId} style={{ borderBottom: "1px solid var(--hairline)", padding: "8px 0" }}>
+            <div className="fv-perm-row" style={{ border: "none", padding: 0 }}>
+              <span className="fv-perm-app">{appById[p.appId]?.name || p.appId}</span>
+              <select
+                className="fv-select"
+                value={p.level}
+                onChange={(e) => changeLevel(p.appId, e.target.value)}
+                style={{ width: 160 }}
+              >
+                {levelOptionsFor(p.appId, p.level).map((l) => <option key={l} value={l}>{l}</option>)}
+              </select>
+              <button className="fv-btn fv-btn-danger fv-btn-sm" onClick={() => removePerm(p.appId)}><X size={12} />Revoke</button>
+            </div>
+            <input
+              className="fv-input"
+              value={p.notes || ""}
+              onChange={(e) => changeNotes(p.appId, e.target.value)}
+              placeholder="Notes (e.g. Zoom ext. 1234, softphone)"
+              style={{ marginTop: 6, fontSize: 12.5 }}
+            />
           </div>
         ))}
         {perms.length === 0 && <div style={{ color: "#98A2B3", fontSize: 13, padding: "8px 0" }}>No access assigned.</div>}
@@ -854,6 +991,13 @@ function EditPermissionsModal({ employee, apps, onClose, onSave }) {
             </select>
             <button className="fv-btn fv-btn-sm" onClick={addPerm} disabled={!availableApps.length}>Add</button>
           </div>
+          <input
+            className="fv-input"
+            value={newNotes}
+            onChange={(e) => setNewNotes(e.target.value)}
+            placeholder="Notes for this grant (optional — e.g. Zoom ext. 1234, softphone)"
+            style={{ marginTop: 8 }}
+          />
         </div>
 
         <div className="fv-modal-actions">
@@ -865,6 +1009,8 @@ function EditPermissionsModal({ employee, apps, onClose, onSave }) {
   );
 }
 
+const LOCATION_PRESETS = ["Puerto Rico", "United States", "India"];
+
 function EditEmployeeInfoModal({ employee, departments, onClose, onSave }) {
   const [name, setName] = useState(employee.name);
   const [email, setEmail] = useState(employee.email || "");
@@ -873,6 +1019,10 @@ function EditEmployeeInfoModal({ employee, departments, onClose, onSave }) {
   const [department, setDepartment] = useState(employee.department);
   const [customDept, setCustomDept] = useState("");
   const usingCustom = department === "__custom__";
+  const locOptions = LOCATION_PRESETS.includes(employee.location) || !employee.location ? LOCATION_PRESETS : [employee.location, ...LOCATION_PRESETS];
+  const [location, setLocation] = useState(employee.location || "");
+  const [customLoc, setCustomLoc] = useState("");
+  const usingCustomLoc = location === "__custom__";
 
   return (
     <div className="fv-modal-overlay" onClick={onClose}>
@@ -898,6 +1048,17 @@ function EditEmployeeInfoModal({ employee, departments, onClose, onSave }) {
           )}
         </div>
         <div className="fv-field">
+          <label>Location</label>
+          <select className="fv-select" value={location} onChange={(e) => setLocation(e.target.value)}>
+            <option value="">Unspecified</option>
+            {locOptions.map((l) => <option key={l} value={l}>{l}</option>)}
+            <option value="__custom__">Other...</option>
+          </select>
+          {usingCustomLoc && (
+            <input className="fv-input" style={{ marginTop: 8 }} value={customLoc} onChange={(e) => setCustomLoc(e.target.value)} placeholder="Location" />
+          )}
+        </div>
+        <div className="fv-field">
           <label className="fv-checkbox-label" style={{ fontSize: 13.5, color: "var(--text)" }}>
             <input type="checkbox" checked={google2fa} onChange={(e) => setGoogle2fa(e.target.checked)} />
             Google 2FA active
@@ -908,7 +1069,7 @@ function EditEmployeeInfoModal({ employee, departments, onClose, onSave }) {
           <button
             className="fv-btn"
             disabled={!name.trim() || (usingCustom && !customDept.trim())}
-            onClick={() => onSave(name.trim(), usingCustom ? customDept.trim() : department, email.trim(), google2fa)}
+            onClick={() => onSave(name.trim(), usingCustom ? customDept.trim() : department, email.trim(), google2fa, usingCustomLoc ? customLoc.trim() : location)}
           >
             Save changes
           </button>
@@ -924,6 +1085,8 @@ function AddEmployeeModal({ departments, onClose, onAdd }) {
   const [google2fa, setGoogle2fa] = useState(false);
   const [department, setDepartment] = useState(departments[0] || "");
   const [customDept, setCustomDept] = useState("");
+  const [location, setLocation] = useState("");
+  const [customLoc, setCustomLoc] = useState("");
   return (
     <div className="fv-modal-overlay" onClick={onClose}>
       <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
@@ -948,6 +1111,17 @@ function AddEmployeeModal({ departments, onClose, onAdd }) {
           )}
         </div>
         <div className="fv-field">
+          <label>Location</label>
+          <select className="fv-select" value={location} onChange={(e) => setLocation(e.target.value)}>
+            <option value="">Unspecified</option>
+            {LOCATION_PRESETS.map((l) => <option key={l} value={l}>{l}</option>)}
+            <option value="__custom__">Other...</option>
+          </select>
+          {location === "__custom__" && (
+            <input className="fv-input" style={{ marginTop: 8 }} value={customLoc} onChange={(e) => setCustomLoc(e.target.value)} placeholder="Location" />
+          )}
+        </div>
+        <div className="fv-field">
           <label className="fv-checkbox-label" style={{ fontSize: 13.5, color: "var(--text)" }}>
             <input type="checkbox" checked={google2fa} onChange={(e) => setGoogle2fa(e.target.checked)} />
             Google 2FA active
@@ -958,7 +1132,7 @@ function AddEmployeeModal({ departments, onClose, onAdd }) {
           <button
             className="fv-btn"
             disabled={!name.trim()}
-            onClick={() => onAdd(name.trim(), department === "__custom__" ? customDept.trim() : department, email.trim(), google2fa)}
+            onClick={() => onAdd(name.trim(), department === "__custom__" ? customDept.trim() : department, email.trim(), google2fa, location === "__custom__" ? customLoc.trim() : location)}
           >
             Add
           </button>
@@ -1043,7 +1217,7 @@ function DeleteEmployeeModal({ employee, onClose, onConfirm }) {
   );
 }
 
-function ManageDepartmentsModal({ departments, onClose, onSave }) {
+function ManageDepartmentsModal({ departments, onClose, onSave, onEditDefaults }) {
   const [values, setValues] = useState(Object.fromEntries(departments.map((d) => [d, d])));
 
   function handleSave() {
@@ -1052,19 +1226,132 @@ function ManageDepartmentsModal({ departments, onClose, onSave }) {
 
   return (
     <div className="fv-modal-overlay" onClick={onClose}>
-      <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 460 }}>
+      <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 480 }}>
         <h3><Building2 size={16} />Manage departments</h3>
         <div className="fv-modal-sub">Renaming a department updates every employee currently in it. Recorded in the audit log.</div>
         {departments.map((d) => (
           <div className="fv-field" key={d}>
             <label>{d}</label>
-            <input className="fv-input" value={values[d] ?? d} onChange={(e) => setValues({ ...values, [d]: e.target.value })} />
+            <div style={{ display: "flex", gap: 8 }}>
+              <input className="fv-input" style={{ flex: 1 }} value={values[d] ?? d} onChange={(e) => setValues({ ...values, [d]: e.target.value })} />
+              <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={() => onEditDefaults(d)}><ListPlus size={12} />Default apps</button>
+            </div>
           </div>
         ))}
         {departments.length === 0 && <div style={{ color: "#98A2B3", fontSize: 13 }}>No departments yet.</div>}
         <div className="fv-modal-actions">
           <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
           <button className="fv-btn" onClick={handleSave}>Save changes</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeptDefaultsModal({ department, apps, current, onClose, onSave }) {
+  const [selected, setSelected] = useState(current.map((c) => ({ ...c })));
+  const appById = Object.fromEntries(apps.map((a) => [a.id, a]));
+  const availableApps = apps.filter((a) => !selected.some((s) => s.appId === a.id));
+  const [newAppId, setNewAppId] = useState(availableApps[0]?.id || "");
+
+  function levelsFor(appId) { return appById[appId]?.levels?.length ? appById[appId].levels : LEVEL_PRESETS; }
+  const [newLevel, setNewLevel] = useState("");
+  const effectiveNewLevel = levelsFor(newAppId).includes(newLevel) ? newLevel : levelsFor(newAppId)[0];
+
+  function add() {
+    if (!newAppId) return;
+    setSelected([...selected, { appId: newAppId, level: effectiveNewLevel }]);
+    setNewLevel("");
+  }
+  function remove(appId) { setSelected(selected.filter((s) => s.appId !== appId)); }
+  function changeLevel(appId, level) { setSelected(selected.map((s) => (s.appId === appId ? { ...s, level } : s))); }
+  function selectAll() {
+    setSelected(apps.map((a) => ({ appId: a.id, level: levelsFor(a.id)[0] })));
+  }
+
+  return (
+    <div className="fv-modal-overlay" onClick={onClose}>
+      <div className="fv-modal" onClick={(e) => e.stopPropagation()}>
+        <h3><ListPlus size={16} />Default apps for {department}</h3>
+        <div className="fv-modal-sub">
+          These grants can be applied in bulk to employees in this department (select them and use "Apply department defaults"). For a department that should get everything — e.g. IT — use "Select all apps" below.
+        </div>
+        {selected.map((s) => (
+          <div className="fv-perm-row" key={s.appId}>
+            <span className="fv-perm-app">{appById[s.appId]?.name || s.appId}</span>
+            <select className="fv-select" value={s.level} onChange={(e) => changeLevel(s.appId, e.target.value)} style={{ width: 160 }}>
+              {levelsFor(s.appId).map((l) => <option key={l} value={l}>{l}</option>)}
+            </select>
+            <button className="fv-btn fv-btn-danger fv-btn-sm" onClick={() => remove(s.appId)}><X size={12} />Remove</button>
+          </div>
+        ))}
+        {selected.length === 0 && <div style={{ color: "#98A2B3", fontSize: 13, padding: "8px 0" }}>No default apps set for this department yet.</div>}
+
+        <div className="fv-field" style={{ marginTop: 16 }}>
+          <label>Add a default app</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <select className="fv-select" value={newAppId} onChange={(e) => { setNewAppId(e.target.value); setNewLevel(""); }} style={{ flex: 1 }}>
+              {availableApps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+            <select className="fv-select" value={effectiveNewLevel} onChange={(e) => setNewLevel(e.target.value)} style={{ width: 150 }}>
+              {levelsFor(newAppId).map((l) => <option key={l} value={l}>{l}</option>)}
+            </select>
+            <button className="fv-btn fv-btn-sm" onClick={add} disabled={!availableApps.length}>Add</button>
+          </div>
+        </div>
+        <button className="fv-btn fv-btn-ghost fv-btn-sm" style={{ marginTop: 10 }} onClick={selectAll}>Select all apps (e.g. for IT)</button>
+
+        <div className="fv-modal-actions">
+          <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="fv-btn" onClick={() => onSave(selected)}>Save changes</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BulkOffboardModal({ count, onClose, onConfirm }) {
+  const [reason, setReason] = useState("");
+  return (
+    <div className="fv-modal-overlay" onClick={onClose}>
+      <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
+        <h3><UserMinus size={16} />Offboard {count} employee(s)</h3>
+        <div className="fv-modal-sub">Revokes all access for each selected active employee. Recorded in the audit log.</div>
+        <div className="fv-field">
+          <label>Reason (optional)</label>
+          <select className="fv-select" value={reason} onChange={(e) => setReason(e.target.value)}>
+            <option value="">Unspecified</option>
+            <option value="Resignation">Resignation</option>
+            <option value="Termination">Termination</option>
+            <option value="Transfer">Transferred to another entity</option>
+          </select>
+        </div>
+        <div className="fv-modal-actions">
+          <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="fv-btn fv-btn-danger" onClick={() => onConfirm(reason)}><UserMinus size={13} />Confirm offboarding</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BulkDeleteModal({ names, onClose, onConfirm }) {
+  const [confirmText, setConfirmText] = useState("");
+  const matches = confirmText.trim().toUpperCase() === "DELETE";
+  return (
+    <div className="fv-modal-overlay" onClick={onClose}>
+      <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 460 }}>
+        <h3 style={{ color: "var(--danger)" }}><AlertTriangle size={16} />Permanently delete {names.length} employee(s)</h3>
+        <div className="fv-warning-box">
+          This erases the records and access history of: {names.join(", ")}. Cannot be undone. Only one audit log entry remains per person.
+        </div>
+        <div className="fv-field">
+          <label>Type DELETE to confirm</label>
+          <input className="fv-input" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder="DELETE" />
+        </div>
+        <div className="fv-modal-actions">
+          <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="fv-btn fv-btn-danger" disabled={!matches} onClick={onConfirm}><Trash2 size={13} />Delete permanently</button>
         </div>
       </div>
     </div>
