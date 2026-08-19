@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut } from "lucide-react";
+import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut, UserCog } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const THEME_KEY = "fvbank-theme-pref";
@@ -40,6 +40,7 @@ export default function App() {
   const [addingApp, setAddingApp] = useState(false);
   const [confirmDeleteApp, setConfirmDeleteApp] = useState(null);
   const [confirmDeleteEmployee, setConfirmDeleteEmployee] = useState(null);
+  const [editingEmployeeInfo, setEditingEmployeeInfo] = useState(null);
   const [theme, setTheme] = useState("light");
   const [toast, setToast] = useState(null);
 
@@ -191,6 +192,19 @@ export default function App() {
     await logAudit("Permanent deletion", `${emp.name} (${emp.department}) was permanently deleted from the registry by ${session?.user?.email || "a user"}. Their access history and record were erased; this log entry is the only remaining trace.`);
     setConfirmDeleteEmployee(null);
     showToast(`${emp.name} permanently deleted`);
+  }
+
+  async function handleEditEmployeeInfo(empId, name, department) {
+    const emp = employees.find((e) => e.id === empId);
+    const changes = [];
+    if (name !== emp.name) changes.push(`name: "${emp.name}" → "${name}"`);
+    if (department !== emp.department) changes.push(`department: "${emp.department}" → "${department}"`);
+    if (!changes.length) { setEditingEmployeeInfo(null); return; }
+    await supabase.from("employees").update({ name, department }).eq("id", empId);
+    setEmployees((prev) => prev.map((e) => (e.id === empId ? { ...e, name, department } : e)));
+    await logAudit("Employee info updated", `${emp.name}: ${changes.join(", ")}`);
+    setEditingEmployeeInfo(null);
+    showToast("Employee updated");
   }
 
   async function handleAddApp(name, owner) {
@@ -573,6 +587,7 @@ export default function App() {
                   <td>
                     {e.status === "active" ? (
                       <>
+                        <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={() => setEditingEmployeeInfo(e.id)}><UserCog size={12} />Edit</button>{" "}
                         <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={() => setEditingEmployee(e.id)}><Pencil size={12} />Edit permissions</button>{" "}
                         <button className="fv-btn fv-btn-danger fv-btn-sm" onClick={() => setConfirmOffboard(e.id)}><UserMinus size={12} />Offboard</button>{" "}
                       </>
@@ -655,6 +670,15 @@ export default function App() {
             handleUpdatePermissions(editingEmployee, perms, note);
             setEditingEmployee(null);
           }}
+        />
+      )}
+
+      {editingEmployeeInfo && (
+        <EditEmployeeInfoModal
+          employee={employees.find((e) => e.id === editingEmployeeInfo)}
+          departments={departments.filter((d) => d !== "All")}
+          onClose={() => setEditingEmployeeInfo(null)}
+          onSave={(name, department) => handleEditEmployeeInfo(editingEmployeeInfo, name, department)}
         />
       )}
 
@@ -772,6 +796,47 @@ function EditPermissionsModal({ employee, apps, onClose, onSave }) {
         <div className="fv-modal-actions">
           <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
           <button className="fv-btn" onClick={handleSave}>Save changes</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditEmployeeInfoModal({ employee, departments, onClose, onSave }) {
+  const [name, setName] = useState(employee.name);
+  const options = departments.includes(employee.department) ? departments : [employee.department, ...departments];
+  const [department, setDepartment] = useState(employee.department);
+  const [customDept, setCustomDept] = useState("");
+  const usingCustom = department === "__custom__";
+
+  return (
+    <div className="fv-modal-overlay" onClick={onClose}>
+      <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+        <h3><UserCog size={16} />Edit employee</h3>
+        <div className="fv-modal-sub">Changes are recorded in the audit log.</div>
+        <div className="fv-field">
+          <label>Full name</label>
+          <input className="fv-input" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="fv-field">
+          <label>Department</label>
+          <select className="fv-select" value={department} onChange={(e) => setDepartment(e.target.value)}>
+            {options.map((d) => <option key={d} value={d}>{d}</option>)}
+            <option value="__custom__">Other...</option>
+          </select>
+          {usingCustom && (
+            <input className="fv-input" style={{ marginTop: 8 }} value={customDept} onChange={(e) => setCustomDept(e.target.value)} placeholder="Department name" />
+          )}
+        </div>
+        <div className="fv-modal-actions">
+          <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
+          <button
+            className="fv-btn"
+            disabled={!name.trim() || (usingCustom && !customDept.trim())}
+            onClick={() => onSave(name.trim(), usingCustom ? customDept.trim() : department)}
+          >
+            Save changes
+          </button>
         </div>
       </div>
     </div>
