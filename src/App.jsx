@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut, UserCog } from "lucide-react";
+import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut, UserCog, ShieldCheck, ShieldOff, Building2, ListPlus } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const THEME_KEY = "fvbank-theme-pref";
@@ -33,7 +33,7 @@ export default function App() {
   const [tab, setTab] = useState("matrix");
   const [search, setSearch] = useState("");
   const [deptFilter, setDeptFilter] = useState("All");
-  const [showOffboarded, setShowOffboarded] = useState(false);
+  const [statusFilter, setStatusFilter] = useState("active");
   const [editingEmployee, setEditingEmployee] = useState(null);
   const [addingEmployee, setAddingEmployee] = useState(false);
   const [confirmOffboard, setConfirmOffboard] = useState(null);
@@ -41,6 +41,8 @@ export default function App() {
   const [confirmDeleteApp, setConfirmDeleteApp] = useState(null);
   const [confirmDeleteEmployee, setConfirmDeleteEmployee] = useState(null);
   const [editingEmployeeInfo, setEditingEmployeeInfo] = useState(null);
+  const [managingDepartments, setManagingDepartments] = useState(false);
+  const [editingAppLevels, setEditingAppLevels] = useState(null);
   const [theme, setTheme] = useState("light");
   const [toast, setToast] = useState(null);
 
@@ -73,15 +75,15 @@ export default function App() {
       supabase.from("permissions").select("*"),
       supabase.from("audit_log").select("*").order("ts", { ascending: false }).limit(500),
     ]);
-    const nextApps = (appsData || []).map((a) => ({ id: a.id, name: a.name, owner: a.owner || "Unassigned" }));
+    const nextApps = (appsData || []).map((a) => ({ id: a.id, name: a.name, owner: a.owner || "Unassigned", levels: (a.levels && a.levels.length ? a.levels : ["Admin", "User"]) }));
     const permsByEmp = {};
     (permsData || []).forEach((p) => {
       if (!permsByEmp[p.employee_id]) permsByEmp[p.employee_id] = [];
       permsByEmp[p.employee_id].push({ appId: p.app_id, level: p.level, _permId: p.id });
     });
     const nextEmployees = (employeesData || []).map((e) => ({
-      id: e.id, name: e.name, department: e.department || "Unassigned", status: e.status,
-      offboardedAt: e.offboarded_at, offboardReason: e.offboard_reason,
+      id: e.id, name: e.name, email: e.email || "", department: e.department || "Unassigned", status: e.status,
+      offboardedAt: e.offboarded_at, offboardReason: e.offboard_reason, google2fa: !!e.google_2fa_enabled,
       permissions: permsByEmp[e.id] || [],
     }));
     const nextLog = (logData || []).map((l) => ({ id: l.id, ts: nowStamp(l.ts), actor: l.actor, action: l.action, detail: l.detail }));
@@ -118,12 +120,13 @@ export default function App() {
 
   const filteredEmployees = useMemo(() => {
     return employees.filter((e) => {
-      if (!showOffboarded && e.status === "offboarded") return false;
+      if (statusFilter === "active" && e.status !== "active") return false;
+      if (statusFilter === "offboarded" && e.status !== "offboarded") return false;
       if (deptFilter !== "All" && (e.department || "Unassigned") !== deptFilter) return false;
       if (search && !e.name.toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
-  }, [employees, deptFilter, search, showOffboarded]);
+  }, [employees, deptFilter, search, statusFilter]);
 
   const appsWithAnyPermission = useMemo(() => {
     const used = new Set();
@@ -140,11 +143,11 @@ export default function App() {
     return counts;
   }, [employees]);
 
-  async function handleAddEmployee(name, department) {
-    const { data, error } = await supabase.from("employees").insert({ name, department: department || "Unassigned", status: "active" }).select().single();
+  async function handleAddEmployee(name, department, email, google2fa) {
+    const { data, error } = await supabase.from("employees").insert({ name, department: department || "Unassigned", status: "active", email: email || null, google_2fa_enabled: !!google2fa }).select().single();
     if (error) { showToast("Error adding employee"); return; }
-    setEmployees((prev) => [...prev, { id: data.id, name: data.name, department: data.department, status: data.status, permissions: [] }]);
-    await logAudit("Employee added", `Added ${name} (${department || "Unassigned"}).`);
+    setEmployees((prev) => [...prev, { id: data.id, name: data.name, email: data.email || "", department: data.department, status: data.status, google2fa: !!data.google_2fa_enabled, permissions: [] }]);
+    await logAudit("Employee added", `Added ${name} (${department || "Unassigned"})${email ? ` — ${email}` : ""}. 2FA: ${google2fa ? "enabled" : "not enabled"}.`);
     setAddingEmployee(false);
     showToast(`${name} added`);
   }
@@ -194,23 +197,49 @@ export default function App() {
     showToast(`${emp.name} permanently deleted`);
   }
 
-  async function handleEditEmployeeInfo(empId, name, department) {
+  async function handleEditEmployeeInfo(empId, name, department, email, google2fa) {
     const emp = employees.find((e) => e.id === empId);
     const changes = [];
     if (name !== emp.name) changes.push(`name: "${emp.name}" → "${name}"`);
     if (department !== emp.department) changes.push(`department: "${emp.department}" → "${department}"`);
+    if ((email || "") !== (emp.email || "")) changes.push(`email: "${emp.email || "—"}" → "${email || "—"}"`);
+    if (!!google2fa !== !!emp.google2fa) changes.push(`Google 2FA: ${emp.google2fa ? "enabled" : "not enabled"} → ${google2fa ? "enabled" : "not enabled"}`);
     if (!changes.length) { setEditingEmployeeInfo(null); return; }
-    await supabase.from("employees").update({ name, department }).eq("id", empId);
-    setEmployees((prev) => prev.map((e) => (e.id === empId ? { ...e, name, department } : e)));
+    await supabase.from("employees").update({ name, department, email: email || null, google_2fa_enabled: !!google2fa }).eq("id", empId);
+    setEmployees((prev) => prev.map((e) => (e.id === empId ? { ...e, name, department, email, google2fa: !!google2fa } : e)));
     await logAudit("Employee info updated", `${emp.name}: ${changes.join(", ")}`);
     setEditingEmployeeInfo(null);
     showToast("Employee updated");
   }
 
+  async function handleRenameDepartments(renames) {
+    // renames: array of { from, to } where "to" differs from "from"
+    const applied = renames.filter((r) => r.to.trim() && r.to.trim() !== r.from);
+    if (!applied.length) { setManagingDepartments(false); return; }
+    for (const r of applied) {
+      await supabase.from("employees").update({ department: r.to.trim() }).eq("department", r.from);
+    }
+    await fetchAll();
+    await logAudit("Departments renamed", applied.map((r) => `"${r.from}" → "${r.to.trim()}"`).join(", "));
+    setManagingDepartments(false);
+    showToast("Departments updated");
+  }
+
+  async function handleUpdateAppLevels(appId, levels) {
+    const app = apps.find((a) => a.id === appId);
+    const cleanLevels = levels.map((l) => l.trim()).filter(Boolean);
+    if (!cleanLevels.length) { showToast("Keep at least one level"); return; }
+    await supabase.from("apps").update({ levels: cleanLevels }).eq("id", appId);
+    setApps((prev) => prev.map((a) => (a.id === appId ? { ...a, levels: cleanLevels } : a)));
+    await logAudit("Application levels updated", `${app.name}: [${(app.levels || []).join(", ")}] → [${cleanLevels.join(", ")}]`);
+    setEditingAppLevels(null);
+    showToast(`${app.name} levels updated`);
+  }
+
   async function handleAddApp(name, owner) {
     const { data, error } = await supabase.from("apps").insert({ name, owner: owner || "Unassigned" }).select().single();
     if (error) { showToast("Error adding application"); return; }
-    setApps((prev) => [...prev, { id: data.id, name: data.name, owner: data.owner }]);
+    setApps((prev) => [...prev, { id: data.id, name: data.name, owner: data.owner, levels: (data.levels && data.levels.length ? data.levels : ["Admin", "User"]) }]);
     await logAudit("Application added", `Added ${name}${owner ? ` (owner: ${owner})` : ""} to the catalog.`);
     setAddingApp(false);
     showToast(`${name} added`);
@@ -514,12 +543,16 @@ export default function App() {
         <select className="fv-select" value={deptFilter} onChange={(e) => setDeptFilter(e.target.value)}>
           {departments.map((d) => <option key={d} value={d}>{d}</option>)}
         </select>
-        <label className="fv-checkbox-label">
-          <input type="checkbox" checked={showOffboarded} onChange={(e) => setShowOffboarded(e.target.checked)} />
-          Show offboarded
-        </label>
+        <select className="fv-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="active">Active only</option>
+          <option value="offboarded">Offboarded only</option>
+          <option value="all">All statuses</option>
+        </select>
         {tab === "employees" && (
-          <button className="fv-btn" style={{ marginLeft: "auto" }} onClick={() => setAddingEmployee(true)}><UserPlus size={14} />Add employee</button>
+          <>
+            <button className="fv-btn fv-btn-ghost" style={{ marginLeft: "auto" }} onClick={() => setManagingDepartments(true)}><Building2 size={14} />Manage departments</button>
+            <button className="fv-btn" onClick={() => setAddingEmployee(true)}><UserPlus size={14} />Add employee</button>
+          </>
         )}
         {tab === "apps" && (
           <button className="fv-btn" style={{ marginLeft: "auto" }} onClick={() => setAddingApp(true)}><Plus size={14} />Add application</button>
@@ -575,7 +608,14 @@ export default function App() {
                 <tr><td colSpan={5} className="fv-empty">No employees match this filter.</td></tr>
               ) : filteredEmployees.map((e) => (
                 <tr key={e.id}>
-                  <td style={{ fontWeight: 600 }}>{e.name}</td>
+                  <td>
+                    <div style={{ fontWeight: 600 }}>{e.name}</div>
+                    {e.email && <div style={{ fontSize: 11.5, color: "var(--text-dim)", fontFamily: "'JetBrains Mono', monospace" }}>{e.email}</div>}
+                    <div style={{ fontSize: 11, marginTop: 2, display: "flex", alignItems: "center", gap: 4, color: e.google2fa ? "var(--success)" : "var(--text-dim)" }}>
+                      {e.google2fa ? <ShieldCheck size={11} /> : <ShieldOff size={11} />}
+                      {e.google2fa ? "2FA on" : "2FA off"}
+                    </div>
+                  </td>
                   <td>{e.department}</td>
                   <td>
                     <span className={`status-pill ${e.status === "active" ? "status-active" : "status-offboarded"}`}>
@@ -612,19 +652,22 @@ export default function App() {
               <tr>
                 <th>Application</th>
                 <th>Owner</th>
+                <th>Permission levels</th>
                 <th>Employees with access</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {apps.length === 0 ? (
-                <tr><td colSpan={4} className="fv-empty">No applications in the catalog.</td></tr>
+                <tr><td colSpan={5} className="fv-empty">No applications in the catalog.</td></tr>
               ) : apps.map((a) => (
                 <tr key={a.id}>
                   <td style={{ fontWeight: 600 }}>{a.name}</td>
                   <td>{a.owner}</td>
+                  <td style={{ fontSize: 12, color: "var(--text-dim)" }}>{(a.levels || LEVEL_PRESETS).join(", ")}</td>
                   <td>{appEmployeeCounts[a.id] || 0}</td>
                   <td>
+                    <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={() => setEditingAppLevels(a.id)}><ListPlus size={12} />Edit levels</button>{" "}
                     <button className="fv-btn fv-btn-danger fv-btn-sm" onClick={() => setConfirmDeleteApp(a.id)}><Trash2 size={12} />Delete</button>
                   </td>
                 </tr>
@@ -678,7 +721,7 @@ export default function App() {
           employee={employees.find((e) => e.id === editingEmployeeInfo)}
           departments={departments.filter((d) => d !== "All")}
           onClose={() => setEditingEmployeeInfo(null)}
-          onSave={(name, department) => handleEditEmployeeInfo(editingEmployeeInfo, name, department)}
+          onSave={(name, department, email, google2fa) => handleEditEmployeeInfo(editingEmployeeInfo, name, department, email, google2fa)}
         />
       )}
 
@@ -719,6 +762,22 @@ export default function App() {
         />
       )}
 
+      {managingDepartments && (
+        <ManageDepartmentsModal
+          departments={departments.filter((d) => d !== "All")}
+          onClose={() => setManagingDepartments(false)}
+          onSave={handleRenameDepartments}
+        />
+      )}
+
+      {editingAppLevels && (
+        <EditAppLevelsModal
+          app={apps.find((a) => a.id === editingAppLevels)}
+          onClose={() => setEditingAppLevels(null)}
+          onSave={(levels) => handleUpdateAppLevels(editingAppLevels, levels)}
+        />
+      )}
+
       {toast && <div className="fv-toast">{toast}</div>}
     </div>
   );
@@ -727,21 +786,25 @@ export default function App() {
 function EditPermissionsModal({ employee, apps, onClose, onSave }) {
   const [perms, setPerms] = useState(employee.permissions.map((p) => ({ ...p })));
   const [newAppId, setNewAppId] = useState(apps[0]?.id || "");
-  const [newLevel, setNewLevel] = useState("Admin");
+  const [newLevel, setNewLevel] = useState("");
   const [changes, setChanges] = useState([]);
 
   const appById = Object.fromEntries(apps.map((a) => [a.id, a]));
   const availableApps = apps.filter((a) => !perms.some((p) => p.appId === a.id));
+  const levelsForApp = (appId) => (appById[appId]?.levels?.length ? appById[appId].levels : LEVEL_PRESETS);
+  const newAppLevels = levelsForApp(newAppId);
+  const effectiveNewLevel = newAppLevels.includes(newLevel) ? newLevel : newAppLevels[0];
 
-  function levelOptionsFor(currentValue) {
-    return LEVEL_PRESETS.includes(currentValue) ? LEVEL_PRESETS : [currentValue, ...LEVEL_PRESETS];
+  function levelOptionsFor(appId, currentValue) {
+    const base = levelsForApp(appId);
+    return base.includes(currentValue) ? base : [currentValue, ...base];
   }
 
   function addPerm() {
     if (!newAppId) return;
-    setPerms([...perms, { appId: newAppId, level: newLevel }]);
-    setChanges([...changes, `+ ${appById[newAppId]?.name} → ${newLevel}`]);
-    setNewLevel("Admin");
+    setPerms([...perms, { appId: newAppId, level: effectiveNewLevel }]);
+    setChanges([...changes, `+ ${appById[newAppId]?.name} → ${effectiveNewLevel}`]);
+    setNewLevel("");
   }
   function removePerm(appId) {
     const p = perms.find((x) => x.appId === appId);
@@ -773,7 +836,7 @@ function EditPermissionsModal({ employee, apps, onClose, onSave }) {
               onChange={(e) => changeLevel(p.appId, e.target.value)}
               style={{ width: 160 }}
             >
-              {levelOptionsFor(p.level).map((l) => <option key={l} value={l}>{l}</option>)}
+              {levelOptionsFor(p.appId, p.level).map((l) => <option key={l} value={l}>{l}</option>)}
             </select>
             <button className="fv-btn fv-btn-danger fv-btn-sm" onClick={() => removePerm(p.appId)}><X size={12} />Revoke</button>
           </div>
@@ -783,11 +846,11 @@ function EditPermissionsModal({ employee, apps, onClose, onSave }) {
         <div className="fv-field" style={{ marginTop: 16 }}>
           <label>Add access</label>
           <div style={{ display: "flex", gap: 8 }}>
-            <select className="fv-select" value={newAppId} onChange={(e) => setNewAppId(e.target.value)} style={{ flex: 1 }}>
+            <select className="fv-select" value={newAppId} onChange={(e) => { setNewAppId(e.target.value); setNewLevel(""); }} style={{ flex: 1 }}>
               {availableApps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
-            <select className="fv-select" value={newLevel} onChange={(e) => setNewLevel(e.target.value)} style={{ width: 150 }}>
-              {LEVEL_PRESETS.map((l) => <option key={l} value={l}>{l}</option>)}
+            <select className="fv-select" value={effectiveNewLevel} onChange={(e) => setNewLevel(e.target.value)} style={{ width: 150 }}>
+              {newAppLevels.map((l) => <option key={l} value={l}>{l}</option>)}
             </select>
             <button className="fv-btn fv-btn-sm" onClick={addPerm} disabled={!availableApps.length}>Add</button>
           </div>
@@ -804,6 +867,8 @@ function EditPermissionsModal({ employee, apps, onClose, onSave }) {
 
 function EditEmployeeInfoModal({ employee, departments, onClose, onSave }) {
   const [name, setName] = useState(employee.name);
+  const [email, setEmail] = useState(employee.email || "");
+  const [google2fa, setGoogle2fa] = useState(!!employee.google2fa);
   const options = departments.includes(employee.department) ? departments : [employee.department, ...departments];
   const [department, setDepartment] = useState(employee.department);
   const [customDept, setCustomDept] = useState("");
@@ -819,6 +884,10 @@ function EditEmployeeInfoModal({ employee, departments, onClose, onSave }) {
           <input className="fv-input" value={name} onChange={(e) => setName(e.target.value)} />
         </div>
         <div className="fv-field">
+          <label>Email</label>
+          <input className="fv-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@fvbank.us" />
+        </div>
+        <div className="fv-field">
           <label>Department</label>
           <select className="fv-select" value={department} onChange={(e) => setDepartment(e.target.value)}>
             {options.map((d) => <option key={d} value={d}>{d}</option>)}
@@ -828,12 +897,18 @@ function EditEmployeeInfoModal({ employee, departments, onClose, onSave }) {
             <input className="fv-input" style={{ marginTop: 8 }} value={customDept} onChange={(e) => setCustomDept(e.target.value)} placeholder="Department name" />
           )}
         </div>
+        <div className="fv-field">
+          <label className="fv-checkbox-label" style={{ fontSize: 13.5, color: "var(--text)" }}>
+            <input type="checkbox" checked={google2fa} onChange={(e) => setGoogle2fa(e.target.checked)} />
+            Google 2FA active
+          </label>
+        </div>
         <div className="fv-modal-actions">
           <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
           <button
             className="fv-btn"
             disabled={!name.trim() || (usingCustom && !customDept.trim())}
-            onClick={() => onSave(name.trim(), usingCustom ? customDept.trim() : department)}
+            onClick={() => onSave(name.trim(), usingCustom ? customDept.trim() : department, email.trim(), google2fa)}
           >
             Save changes
           </button>
@@ -845,6 +920,8 @@ function EditEmployeeInfoModal({ employee, departments, onClose, onSave }) {
 
 function AddEmployeeModal({ departments, onClose, onAdd }) {
   const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [google2fa, setGoogle2fa] = useState(false);
   const [department, setDepartment] = useState(departments[0] || "");
   const [customDept, setCustomDept] = useState("");
   return (
@@ -857,6 +934,10 @@ function AddEmployeeModal({ departments, onClose, onAdd }) {
           <input className="fv-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="First Last" />
         </div>
         <div className="fv-field">
+          <label>Email</label>
+          <input className="fv-input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@fvbank.us" />
+        </div>
+        <div className="fv-field">
           <label>Department</label>
           <select className="fv-select" value={department} onChange={(e) => setDepartment(e.target.value)}>
             {departments.map((d) => <option key={d} value={d}>{d}</option>)}
@@ -866,12 +947,18 @@ function AddEmployeeModal({ departments, onClose, onAdd }) {
             <input className="fv-input" style={{ marginTop: 8 }} value={customDept} onChange={(e) => setCustomDept(e.target.value)} placeholder="Department name" />
           )}
         </div>
+        <div className="fv-field">
+          <label className="fv-checkbox-label" style={{ fontSize: 13.5, color: "var(--text)" }}>
+            <input type="checkbox" checked={google2fa} onChange={(e) => setGoogle2fa(e.target.checked)} />
+            Google 2FA active
+          </label>
+        </div>
         <div className="fv-modal-actions">
           <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
           <button
             className="fv-btn"
             disabled={!name.trim()}
-            onClick={() => onAdd(name.trim(), department === "__custom__" ? customDept.trim() : department)}
+            onClick={() => onAdd(name.trim(), department === "__custom__" ? customDept.trim() : department, email.trim(), google2fa)}
           >
             Add
           </button>
@@ -950,6 +1037,78 @@ function DeleteEmployeeModal({ employee, onClose, onConfirm }) {
         <div className="fv-modal-actions">
           <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
           <button className="fv-btn fv-btn-danger" disabled={!matches} onClick={onConfirm}><Trash2 size={13} />Delete permanently</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ManageDepartmentsModal({ departments, onClose, onSave }) {
+  const [values, setValues] = useState(Object.fromEntries(departments.map((d) => [d, d])));
+
+  function handleSave() {
+    onSave(departments.map((d) => ({ from: d, to: values[d] ?? d })));
+  }
+
+  return (
+    <div className="fv-modal-overlay" onClick={onClose}>
+      <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 460 }}>
+        <h3><Building2 size={16} />Manage departments</h3>
+        <div className="fv-modal-sub">Renaming a department updates every employee currently in it. Recorded in the audit log.</div>
+        {departments.map((d) => (
+          <div className="fv-field" key={d}>
+            <label>{d}</label>
+            <input className="fv-input" value={values[d] ?? d} onChange={(e) => setValues({ ...values, [d]: e.target.value })} />
+          </div>
+        ))}
+        {departments.length === 0 && <div style={{ color: "#98A2B3", fontSize: 13 }}>No departments yet.</div>}
+        <div className="fv-modal-actions">
+          <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="fv-btn" onClick={handleSave}>Save changes</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditAppLevelsModal({ app, onClose, onSave }) {
+  const [levels, setLevels] = useState((app.levels && app.levels.length ? app.levels : LEVEL_PRESETS).slice());
+  const [newLevel, setNewLevel] = useState("");
+
+  function addLevel() {
+    const v = newLevel.trim();
+    if (!v || levels.includes(v)) return;
+    setLevels([...levels, v]);
+    setNewLevel("");
+  }
+  function removeLevel(v) {
+    setLevels(levels.filter((l) => l !== v));
+  }
+  function renameLevel(oldV, newV) {
+    setLevels(levels.map((l) => (l === oldV ? newV : l)));
+  }
+
+  return (
+    <div className="fv-modal-overlay" onClick={onClose}>
+      <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
+        <h3><ListPlus size={16} />Permission levels for {app.name}</h3>
+        <div className="fv-modal-sub">These are the options available when granting access to this application (e.g. Admin, Administrator, Viewer, Read-only).</div>
+        {levels.map((l, i) => (
+          <div className="fv-perm-row" key={i}>
+            <input className="fv-input" style={{ flex: 1 }} value={l} onChange={(e) => renameLevel(l, e.target.value)} />
+            <button className="fv-btn fv-btn-danger fv-btn-sm" onClick={() => removeLevel(l)} disabled={levels.length <= 1}><X size={12} />Remove</button>
+          </div>
+        ))}
+        <div className="fv-field" style={{ marginTop: 16 }}>
+          <label>Add a level</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input className="fv-input" style={{ flex: 1 }} value={newLevel} onChange={(e) => setNewLevel(e.target.value)} placeholder="e.g. Read-only" onKeyDown={(e) => e.key === "Enter" && addLevel()} />
+            <button className="fv-btn fv-btn-sm" onClick={addLevel} disabled={!newLevel.trim()}>Add</button>
+          </div>
+        </div>
+        <div className="fv-modal-actions">
+          <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="fv-btn" onClick={() => onSave(levels)}>Save changes</button>
         </div>
       </div>
     </div>
