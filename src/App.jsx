@@ -283,6 +283,7 @@ export default function App() {
           --row-hover: #F1ECDD;
           --overlay: rgba(14, 35, 56, 0.6);
           --ghost-hover: #EEF2F6;
+          --btn-solid-text: #FFFFFF;
           font-family: 'Inter', system-ui, -apple-system, sans-serif;
           background: var(--paper);
           color: var(--text);
@@ -323,6 +324,7 @@ export default function App() {
           --row-hover: #202B36;
           --overlay: rgba(4, 8, 12, 0.72);
           --ghost-hover: #1D2731;
+          --btn-solid-text: #0B1620;
         }
         .fv-root * { box-sizing: border-box; }
         .fv-header {
@@ -381,18 +383,16 @@ export default function App() {
         .fv-btn {
           display: inline-flex; align-items: center; gap: 6px;
           padding: 8px 14px; border-radius: 4px; border: 1px solid var(--navy); background: var(--navy);
-          color: var(--fv-root, white); font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
+          color: var(--btn-solid-text); font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
           transition: background 0.15s ease;
         }
-        .fv-root[data-theme="dark"] .fv-btn { color: #0B1620; }
-        .fv-root:not([data-theme="dark"]) .fv-btn { color: #FFFFFF; }
         .fv-btn:hover { background: var(--navy-hover); }
         .fv-btn:disabled { opacity: 0.45; cursor: not-allowed; }
         .fv-btn-ghost {
           background: none; color: var(--navy); border: 1px solid var(--border);
         }
         .fv-btn-ghost:hover { border-color: var(--navy); background: var(--ghost-hover); }
-        .fv-btn-danger { background: var(--danger); border-color: var(--danger); color: white; }
+        .fv-btn-danger { background: var(--danger); border-color: var(--danger); color: var(--btn-solid-text); }
         .fv-btn-danger:hover { background: var(--danger-hover); }
         .fv-btn-sm { padding: 5px 10px; font-size: 12px; }
         .fv-checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-dim); }
