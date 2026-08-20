@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut, UserCog, ShieldCheck, ShieldOff, Building2, ListPlus } from "lucide-react";
+import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut, UserCog, ShieldCheck, ShieldOff, Building2, ListPlus, ListChecks } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const THEME_KEY = "fvbank-theme-pref";
@@ -48,6 +48,11 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [confirmBulkOffboard, setConfirmBulkOffboard] = useState(false);
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [grantAppId, setGrantAppId] = useState("");
+  const [grantLevel, setGrantLevel] = useState("");
+  const [grantSelected, setGrantSelected] = useState([]);
+  const [grantSearch, setGrantSearch] = useState("");
+  const [grantDeptFilter, setGrantDeptFilter] = useState("All");
   const [theme, setTheme] = useState("light");
   const [toast, setToast] = useState(null);
 
@@ -290,6 +295,41 @@ export default function App() {
     await logAudit("Department defaults updated", `${department}: set to [${list.map((d) => `${appById[d.appId]?.name || d.appId} (${d.level})`).join(", ") || "none"}].`);
     setEditingDeptDefaults(null);
     showToast(`${department} defaults saved`);
+  }
+
+  async function handleBulkGrant() {
+    const app = appById[grantAppId];
+    if (!app || !grantLevel || !grantSelected.length) return;
+    const targets = employees.filter((e) => grantSelected.includes(e.id));
+    let inserted = 0, updated = 0;
+    for (const emp of targets) {
+      const existing = emp.permissions.find((p) => p.appId === grantAppId);
+      if (existing) {
+        if (existing.level !== grantLevel) {
+          await supabase.from("permissions").update({ level: grantLevel }).eq("id", existing._permId);
+          updated++;
+        }
+      } else {
+        await supabase.from("permissions").insert({ employee_id: emp.id, app_id: grantAppId, level: grantLevel });
+        inserted++;
+      }
+    }
+    await fetchAll();
+    await logAudit("Bulk grant", `${app.name} → ${grantLevel}: granted to ${inserted} new employee(s), updated ${updated} existing grant(s). Total selected: ${targets.length}.`);
+    setGrantSelected([]);
+    showToast(`${app.name}: ${inserted + updated} employee(s) updated`);
+  }
+
+  async function handleBulkRevokeGrant() {
+    const app = appById[grantAppId];
+    if (!app || !grantSelected.length) return;
+    const targets = employees.filter((e) => grantSelected.includes(e.id) && e.permissions.some((p) => p.appId === grantAppId));
+    const permIds = targets.flatMap((e) => e.permissions.filter((p) => p.appId === grantAppId).map((p) => p._permId));
+    if (permIds.length) await supabase.from("permissions").delete().in("id", permIds);
+    await fetchAll();
+    await logAudit("Bulk revoke", `${app.name}: revoked from ${targets.length} employee(s): ${targets.map((e) => e.name).join(", ")}.`);
+    setGrantSelected([]);
+    showToast(`${app.name}: revoked from ${targets.length} employee(s)`);
   }
 
   async function handleRenameDepartments(renames) {
@@ -615,9 +655,11 @@ export default function App() {
         <button className={`fv-tab ${tab === "matrix" ? "active" : ""}`} onClick={() => setTab("matrix")}><LayoutGrid size={15} />Access Matrix</button>
         <button className={`fv-tab ${tab === "employees" ? "active" : ""}`} onClick={() => setTab("employees")}><Users size={15} />Employees</button>
         <button className={`fv-tab ${tab === "apps" ? "active" : ""}`} onClick={() => setTab("apps")}><Boxes size={15} />Applications</button>
+        <button className={`fv-tab ${tab === "grant" ? "active" : ""}`} onClick={() => setTab("grant")}><ListChecks size={15} />Bulk Grant</button>
         <button className={`fv-tab ${tab === "audit" ? "active" : ""}`} onClick={() => setTab("audit")}><ScrollText size={15} />Audit Log</button>
       </div>
 
+      {tab !== "grant" && (
       <div className="fv-toolbar">
         <input className="fv-input" placeholder="Search employee..." value={search} onChange={(e) => setSearch(e.target.value)} style={{ minWidth: 220 }} />
         <select className="fv-select" value={deptFilter} onChange={(e) => setDeptFilter(e.target.value)}>
@@ -638,6 +680,7 @@ export default function App() {
           <button className="fv-btn" style={{ marginLeft: "auto" }} onClick={() => setAddingApp(true)}><Plus size={14} />Add application</button>
         )}
       </div>
+      )}
 
       {tab === "matrix" && (
         <div className="fv-card">
@@ -778,6 +821,26 @@ export default function App() {
         </div>
       )}
 
+      {tab === "grant" && (
+        <BulkGrantPanel
+          apps={apps}
+          employees={employees}
+          departments={departments.filter((d) => d !== "All")}
+          grantAppId={grantAppId}
+          setGrantAppId={setGrantAppId}
+          grantLevel={grantLevel}
+          setGrantLevel={setGrantLevel}
+          grantSelected={grantSelected}
+          setGrantSelected={setGrantSelected}
+          grantSearch={grantSearch}
+          setGrantSearch={setGrantSearch}
+          grantDeptFilter={grantDeptFilter}
+          setGrantDeptFilter={setGrantDeptFilter}
+          onGrant={handleBulkGrant}
+          onRevoke={handleBulkRevokeGrant}
+        />
+      )}
+
       {tab === "audit" && (
         <div className="fv-card">
           <table className="fv-list-table">
@@ -907,6 +970,103 @@ export default function App() {
       )}
 
       {toast && <div className="fv-toast">{toast}</div>}
+    </div>
+  );
+}
+
+function BulkGrantPanel({
+  apps, employees, departments,
+  grantAppId, setGrantAppId, grantLevel, setGrantLevel,
+  grantSelected, setGrantSelected, grantSearch, setGrantSearch, grantDeptFilter, setGrantDeptFilter,
+  onGrant, onRevoke,
+}) {
+  const appById = Object.fromEntries(apps.map((a) => [a.id, a]));
+  const selectedApp = appById[grantAppId];
+  const levels = selectedApp?.levels?.length ? selectedApp.levels : LEVEL_PRESETS;
+  const effectiveLevel = levels.includes(grantLevel) ? grantLevel : levels[0];
+
+  const filtered = employees.filter((e) => {
+    if (e.status !== "active") return false;
+    if (grantDeptFilter !== "All" && e.department !== grantDeptFilter) return false;
+    if (grantSearch && !e.name.toLowerCase().includes(grantSearch.toLowerCase())) return false;
+    return true;
+  });
+
+  function toggle(id) {
+    setGrantSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+  function selectAllFiltered() {
+    const ids = filtered.map((e) => e.id);
+    setGrantSelected((prev) => (ids.every((id) => prev.includes(id)) ? prev.filter((id) => !ids.includes(id)) : Array.from(new Set([...prev, ...ids]))));
+  }
+
+  const currentLevelFor = (emp) => emp.permissions.find((p) => p.appId === grantAppId)?.level;
+
+  return (
+    <div className="fv-card" style={{ padding: 16 }}>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 14 }}>
+        <div className="fv-field" style={{ marginBottom: 0, minWidth: 220 }}>
+          <label>Application</label>
+          <select className="fv-select" style={{ width: "100%" }} value={grantAppId} onChange={(e) => { setGrantAppId(e.target.value); setGrantLevel(""); }}>
+            <option value="">Select an application...</option>
+            {apps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </div>
+        <div className="fv-field" style={{ marginBottom: 0, minWidth: 160 }}>
+          <label>Level</label>
+          <select className="fv-select" style={{ width: "100%" }} value={effectiveLevel} onChange={(e) => setGrantLevel(e.target.value)} disabled={!grantAppId}>
+            {levels.map((l) => <option key={l} value={l}>{l}</option>)}
+          </select>
+        </div>
+        <button className="fv-btn" disabled={!grantAppId || !grantSelected.length} onClick={onGrant}>
+          <ListChecks size={14} />Grant {effectiveLevel} to {grantSelected.length || 0} selected
+        </button>
+        <button className="fv-btn fv-btn-ghost" disabled={!grantAppId || !grantSelected.length} onClick={onRevoke} style={{ color: "var(--danger)", borderColor: "var(--danger-soft)" }}>
+          <X size={14} />Revoke {selectedApp?.name || "app"} from selected
+        </button>
+      </div>
+
+      {!grantAppId ? (
+        <div className="fv-empty">Pick an application above to see and select employees.</div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 10, marginBottom: 10, alignItems: "center" }}>
+            <input className="fv-input" placeholder="Search employee..." value={grantSearch} onChange={(e) => setGrantSearch(e.target.value)} style={{ minWidth: 200 }} />
+            <select className="fv-select" value={grantDeptFilter} onChange={(e) => setGrantDeptFilter(e.target.value)}>
+              <option value="All">All</option>
+              {departments.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+            <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={selectAllFiltered}>Select/deselect all shown ({filtered.length})</button>
+            <span style={{ fontSize: 12.5, color: "var(--text-dim)", marginLeft: "auto" }}>{grantSelected.length} selected total</span>
+          </div>
+          <div className="fv-table-wrap" style={{ maxHeight: "50vh" }}>
+            <table className="fv-list-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 36 }}></th>
+                  <th>Employee</th>
+                  <th>Department</th>
+                  <th>Current access to {selectedApp?.name}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((e) => {
+                  const currentLevel = currentLevelFor(e);
+                  return (
+                    <tr key={e.id}>
+                      <td><input type="checkbox" checked={grantSelected.includes(e.id)} onChange={() => toggle(e.id)} /></td>
+                      <td style={{ fontWeight: 600 }}>{e.name}</td>
+                      <td>{e.department}</td>
+                      <td>{currentLevel ? <Badge level={currentLevel} /> : <span style={{ color: "#98A2B3" }}>None</span>}</td>
+                    </tr>
+                  );
+                })}
+                {filtered.length === 0 && <tr><td colSpan={4} className="fv-empty">No employees match this filter.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   );
 }
