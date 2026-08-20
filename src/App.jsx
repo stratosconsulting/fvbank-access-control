@@ -262,7 +262,12 @@ export default function App() {
     const targets = employees.filter((e) => selectedIds.includes(e.id) && e.status === "active");
     let totalGrants = 0;
     for (const emp of targets) {
-      const defaults = deptDefaults[emp.department] || [];
+      const companyWide = deptDefaults["*"] || [];
+      const deptSpecific = deptDefaults[emp.department] || [];
+      const merged = {};
+      companyWide.forEach((d) => { merged[d.appId] = d.level; });
+      deptSpecific.forEach((d) => { merged[d.appId] = d.level; }); // dept-specific wins on conflict
+      const defaults = Object.entries(merged).map(([appId, level]) => ({ appId, level }));
       const existingAppIds = new Set(emp.permissions.map((p) => p.appId));
       const toInsert = defaults.filter((d) => !existingAppIds.has(d.appId));
       if (toInsert.length) {
@@ -271,7 +276,7 @@ export default function App() {
       }
     }
     await fetchAll();
-    await logAudit("Applied department defaults", `Applied department default access to ${targets.length} employee(s), granting ${totalGrants} new access(es) total.`);
+    await logAudit("Applied department defaults", `Applied company-wide + department default access to ${targets.length} employee(s), granting ${totalGrants} new access(es) total.`);
     setSelectedIds([]);
     showToast(`Defaults applied to ${targets.length} employee(s)`);
   }
@@ -1229,6 +1234,12 @@ function ManageDepartmentsModal({ departments, onClose, onSave, onEditDefaults }
       <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 480 }}>
         <h3><Building2 size={16} />Manage departments</h3>
         <div className="fv-modal-sub">Renaming a department updates every employee currently in it. Recorded in the audit log.</div>
+
+        <div className="fv-field" style={{ background: "var(--gold-soft)", padding: 12, borderRadius: 6 }}>
+          <label style={{ color: "var(--gold-soft-text)" }}>Company-wide (applies to every department)</label>
+          <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={() => onEditDefaults("*")}><ListPlus size={12} />Edit company-wide defaults</button>
+        </div>
+
         {departments.map((d) => (
           <div className="fv-field" key={d}>
             <label>{d}</label>
@@ -1272,9 +1283,11 @@ function DeptDefaultsModal({ department, apps, current, onClose, onSave }) {
   return (
     <div className="fv-modal-overlay" onClick={onClose}>
       <div className="fv-modal" onClick={(e) => e.stopPropagation()}>
-        <h3><ListPlus size={16} />Default apps for {department}</h3>
+        <h3><ListPlus size={16} />Default apps for {department === "*" ? "everyone (company-wide)" : department}</h3>
         <div className="fv-modal-sub">
-          These grants can be applied in bulk to employees in this department (select them and use "Apply department defaults"). For a department that should get everything — e.g. IT — use "Select all apps" below.
+          {department === "*"
+            ? "These grants are combined with each employee's department defaults whenever you use \"Apply department defaults.\" Use this for things every employee gets, like Google Cloud Platform or Zoom."
+            : "These grants can be applied in bulk to employees in this department (select them and use \"Apply department defaults\"), combined with any company-wide defaults. For a department that should get everything — e.g. IT — use \"Select all apps\" below."}
         </div>
         {selected.map((s) => (
           <div className="fv-perm-row" key={s.appId}>
