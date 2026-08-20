@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut, UserCog, ShieldCheck, ShieldOff, Building2, ListPlus, ListChecks } from "lucide-react";
+import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut, UserCog, ShieldCheck, ShieldOff, Building2, ListPlus, ListChecks, Bot } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const THEME_KEY = "fvbank-theme-pref";
@@ -53,6 +53,11 @@ export default function App() {
   const [grantSelected, setGrantSelected] = useState([]);
   const [grantSearch, setGrantSearch] = useState("");
   const [grantDeptFilter, setGrantDeptFilter] = useState("All");
+  const [serviceAccounts, setServiceAccounts] = useState([]);
+  const [addingServiceAccount, setAddingServiceAccount] = useState(false);
+  const [editingServiceAccount, setEditingServiceAccount] = useState(null);
+  const [confirmDeleteServiceAccount, setConfirmDeleteServiceAccount] = useState(null);
+  const [editingAppName, setEditingAppName] = useState(null);
   const [theme, setTheme] = useState("light");
   const [toast, setToast] = useState(null);
 
@@ -79,12 +84,13 @@ export default function App() {
   }, []);
 
   const fetchAll = useCallback(async () => {
-    const [{ data: appsData }, { data: employeesData }, { data: permsData }, { data: logData }, { data: deptDefData }] = await Promise.all([
+    const [{ data: appsData }, { data: employeesData }, { data: permsData }, { data: logData }, { data: deptDefData }, { data: svcData }] = await Promise.all([
       supabase.from("apps").select("*").order("name"),
       supabase.from("employees").select("*").order("name"),
       supabase.from("permissions").select("*"),
       supabase.from("audit_log").select("*").order("ts", { ascending: false }).limit(500),
       supabase.from("department_defaults").select("*"),
+      supabase.from("service_accounts").select("*").order("name"),
     ]);
     const nextApps = (appsData || []).map((a) => ({ id: a.id, name: a.name, owner: a.owner || "Unassigned", levels: (a.levels && a.levels.length ? a.levels : ["Admin", "User"]) }));
     const permsByEmp = {};
@@ -104,10 +110,14 @@ export default function App() {
       if (!nextDeptDefaults[d.department]) nextDeptDefaults[d.department] = [];
       nextDeptDefaults[d.department].push({ appId: d.app_id, level: d.level });
     });
+    const nextServiceAccounts = (svcData || []).map((s) => ({
+      id: s.id, name: s.name, description: s.description || "", owner: s.owner || "", appId: s.app_id || "", status: s.status,
+    }));
     setApps(nextApps);
     setEmployees(nextEmployees);
     setAuditLog(nextLog);
     setDeptDefaults(nextDeptDefaults);
+    setServiceAccounts(nextServiceAccounts);
     setReady(true);
   }, []);
 
@@ -330,6 +340,53 @@ export default function App() {
     await logAudit("Bulk revoke", `${app.name}: revoked from ${targets.length} employee(s): ${targets.map((e) => e.name).join(", ")}.`);
     setGrantSelected([]);
     showToast(`${app.name}: revoked from ${targets.length} employee(s)`);
+  }
+
+  async function handleAddServiceAccount(name, description, owner, appId) {
+    const { data, error } = await supabase.from("service_accounts").insert({ name, description: description || null, owner: owner || null, app_id: appId || null, status: "active" }).select().single();
+    if (error) { showToast("Error adding service account"); return; }
+    setServiceAccounts((prev) => [...prev, { id: data.id, name: data.name, description: data.description || "", owner: data.owner || "", appId: data.app_id || "", status: data.status }]);
+    await logAudit("Service account added", `Added ${name}${owner ? ` (owner: ${owner})` : ""}${appId ? `, associated app: ${appById[appId]?.name}` : ""}.`);
+    setAddingServiceAccount(false);
+    showToast(`${name} added`);
+  }
+
+  async function handleEditServiceAccount(id, name, description, owner, appId, status) {
+    const svc = serviceAccounts.find((s) => s.id === id);
+    const changes = [];
+    if (name !== svc.name) changes.push(`name: "${svc.name}" → "${name}"`);
+    if ((owner || "") !== (svc.owner || "")) changes.push(`owner: "${svc.owner || "—"}" → "${owner || "—"}"`);
+    if ((appId || "") !== (svc.appId || "")) changes.push(`app: "${appById[svc.appId]?.name || "—"}" → "${appById[appId]?.name || "—"}"`);
+    if (status !== svc.status) changes.push(`status: ${svc.status} → ${status}`);
+    if ((description || "") !== (svc.description || "")) changes.push(`description updated`);
+    if (!changes.length) { setEditingServiceAccount(null); return; }
+    await supabase.from("service_accounts").update({ name, description: description || null, owner: owner || null, app_id: appId || null, status }).eq("id", id);
+    setServiceAccounts((prev) => prev.map((s) => (s.id === id ? { ...s, name, description, owner, appId, status } : s)));
+    await logAudit("Service account updated", `${svc.name}: ${changes.join(", ")}`);
+    setEditingServiceAccount(null);
+    showToast("Service account updated");
+  }
+
+  async function handleDeleteServiceAccount(id) {
+    const svc = serviceAccounts.find((s) => s.id === id);
+    await supabase.from("service_accounts").delete().eq("id", id);
+    setServiceAccounts((prev) => prev.filter((s) => s.id !== id));
+    await logAudit("Service account deleted", `${svc.name} removed from the registry.`);
+    setConfirmDeleteServiceAccount(null);
+    showToast(`${svc.name} deleted`);
+  }
+
+  async function handleRenameApp(appId, name, owner) {
+    const app = apps.find((a) => a.id === appId);
+    const changes = [];
+    if (name !== app.name) changes.push(`name: "${app.name}" → "${name}"`);
+    if (owner !== app.owner) changes.push(`owner: "${app.owner}" → "${owner}"`);
+    if (!changes.length) { setEditingAppName(null); return; }
+    await supabase.from("apps").update({ name, owner }).eq("id", appId);
+    setApps((prev) => prev.map((a) => (a.id === appId ? { ...a, name, owner } : a)));
+    await logAudit("Application renamed", `${app.name}: ${changes.join(", ")}`);
+    setEditingAppName(null);
+    showToast("Application updated");
   }
 
   async function handleRenameDepartments(renames) {
@@ -656,10 +713,11 @@ export default function App() {
         <button className={`fv-tab ${tab === "employees" ? "active" : ""}`} onClick={() => setTab("employees")}><Users size={15} />Employees</button>
         <button className={`fv-tab ${tab === "apps" ? "active" : ""}`} onClick={() => setTab("apps")}><Boxes size={15} />Applications</button>
         <button className={`fv-tab ${tab === "grant" ? "active" : ""}`} onClick={() => setTab("grant")}><ListChecks size={15} />Bulk Grant</button>
+        <button className={`fv-tab ${tab === "service" ? "active" : ""}`} onClick={() => setTab("service")}><Bot size={15} />Service Accounts</button>
         <button className={`fv-tab ${tab === "audit" ? "active" : ""}`} onClick={() => setTab("audit")}><ScrollText size={15} />Audit Log</button>
       </div>
 
-      {tab !== "grant" && (
+      {tab !== "grant" && tab !== "service" && (
       <div className="fv-toolbar">
         <input className="fv-input" placeholder="Search employee..." value={search} onChange={(e) => setSearch(e.target.value)} style={{ minWidth: 220 }} />
         <select className="fv-select" value={deptFilter} onChange={(e) => setDeptFilter(e.target.value)}>
@@ -679,6 +737,12 @@ export default function App() {
         {tab === "apps" && (
           <button className="fv-btn" style={{ marginLeft: "auto" }} onClick={() => setAddingApp(true)}><Plus size={14} />Add application</button>
         )}
+      </div>
+      )}
+
+      {tab === "service" && (
+      <div className="fv-toolbar">
+        <button className="fv-btn" style={{ marginLeft: "auto" }} onClick={() => setAddingServiceAccount(true)}><Plus size={14} />Add service account</button>
       </div>
       )}
 
@@ -811,6 +875,7 @@ export default function App() {
                   <td style={{ fontSize: 12, color: "var(--text-dim)" }}>{(a.levels || LEVEL_PRESETS).join(", ")}</td>
                   <td>{appEmployeeCounts[a.id] || 0}</td>
                   <td>
+                    <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={() => setEditingAppName(a.id)}><Pencil size={12} />Edit</button>{" "}
                     <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={() => setEditingAppLevels(a.id)}><ListPlus size={12} />Edit levels</button>{" "}
                     <button className="fv-btn fv-btn-danger fv-btn-sm" onClick={() => setConfirmDeleteApp(a.id)}><Trash2 size={12} />Delete</button>
                   </td>
@@ -839,6 +904,45 @@ export default function App() {
           onGrant={handleBulkGrant}
           onRevoke={handleBulkRevokeGrant}
         />
+      )}
+
+      {tab === "service" && (
+        <div className="fv-card">
+          <table className="fv-list-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Description</th>
+                <th>Owner</th>
+                <th>Associated app</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {serviceAccounts.length === 0 ? (
+                <tr><td colSpan={6} className="fv-empty">No service accounts recorded yet. These don't have app permissions tracked — just kept here for reference.</td></tr>
+              ) : serviceAccounts.map((s) => (
+                <tr key={s.id}>
+                  <td style={{ fontWeight: 600 }}>{s.name}</td>
+                  <td style={{ fontSize: 12.5, color: "var(--text-dim)" }}>{s.description || "—"}</td>
+                  <td>{s.owner || "—"}</td>
+                  <td>{appById[s.appId]?.name || "—"}</td>
+                  <td>
+                    <span className={`status-pill ${s.status === "active" ? "status-active" : "status-offboarded"}`}>
+                      {s.status === "active" ? <Check size={11} /> : <X size={11} />}
+                      {s.status === "active" ? "Active" : "Inactive"}
+                    </span>
+                  </td>
+                  <td>
+                    <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={() => setEditingServiceAccount(s.id)}><Pencil size={12} />Edit</button>{" "}
+                    <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={() => setConfirmDeleteServiceAccount(s.id)} style={{ color: "var(--danger)", borderColor: "var(--danger-soft)" }}><Trash2 size={12} />Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {tab === "audit" && (
@@ -966,6 +1070,39 @@ export default function App() {
           names={employees.filter((e) => selectedIds.includes(e.id)).map((e) => e.name)}
           onClose={() => setConfirmBulkDelete(false)}
           onConfirm={handleBulkDelete}
+        />
+      )}
+
+      {editingAppName && (
+        <EditAppNameModal
+          app={apps.find((a) => a.id === editingAppName)}
+          onClose={() => setEditingAppName(null)}
+          onSave={(name, owner) => handleRenameApp(editingAppName, name, owner)}
+        />
+      )}
+
+      {addingServiceAccount && (
+        <ServiceAccountModal
+          apps={apps}
+          onClose={() => setAddingServiceAccount(false)}
+          onSave={(name, description, owner, appId) => handleAddServiceAccount(name, description, owner, appId)}
+        />
+      )}
+
+      {editingServiceAccount && (
+        <ServiceAccountModal
+          apps={apps}
+          serviceAccount={serviceAccounts.find((s) => s.id === editingServiceAccount)}
+          onClose={() => setEditingServiceAccount(null)}
+          onSave={(name, description, owner, appId, status) => handleEditServiceAccount(editingServiceAccount, name, description, owner, appId, status)}
+        />
+      )}
+
+      {confirmDeleteServiceAccount && (
+        <DeleteServiceAccountModal
+          serviceAccount={serviceAccounts.find((s) => s.id === confirmDeleteServiceAccount)}
+          onClose={() => setConfirmDeleteServiceAccount(null)}
+          onConfirm={() => handleDeleteServiceAccount(confirmDeleteServiceAccount)}
         />
       )}
 
@@ -1569,6 +1706,102 @@ function EditAppLevelsModal({ app, onClose, onSave }) {
         <div className="fv-modal-actions">
           <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
           <button className="fv-btn" onClick={() => onSave(levels)}>Save changes</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditAppNameModal({ app, onClose, onSave }) {
+  const [name, setName] = useState(app.name);
+  const [owner, setOwner] = useState(app.owner);
+  return (
+    <div className="fv-modal-overlay" onClick={onClose}>
+      <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 400 }}>
+        <h3><Pencil size={16} />Edit application</h3>
+        <div className="fv-modal-sub">Recorded in the audit log.</div>
+        <div className="fv-field">
+          <label>Application name</label>
+          <input className="fv-input" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="fv-field">
+          <label>Owner</label>
+          <input className="fv-input" value={owner} onChange={(e) => setOwner(e.target.value)} />
+        </div>
+        <div className="fv-modal-actions">
+          <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="fv-btn" disabled={!name.trim()} onClick={() => onSave(name.trim(), owner.trim())}>Save changes</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ServiceAccountModal({ apps, serviceAccount, onClose, onSave }) {
+  const isEdit = !!serviceAccount;
+  const [name, setName] = useState(serviceAccount?.name || "");
+  const [description, setDescription] = useState(serviceAccount?.description || "");
+  const [owner, setOwner] = useState(serviceAccount?.owner || "");
+  const [appId, setAppId] = useState(serviceAccount?.appId || "");
+  const [status, setStatus] = useState(serviceAccount?.status || "active");
+
+  return (
+    <div className="fv-modal-overlay" onClick={onClose}>
+      <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
+        <h3><Bot size={16} />{isEdit ? "Edit service account" : "Add service account"}</h3>
+        <div className="fv-modal-sub">For record-keeping — service accounts aren't tracked against app permissions yet.</div>
+        <div className="fv-field">
+          <label>Name</label>
+          <input className="fv-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. svc-backup-fireblocks" />
+        </div>
+        <div className="fv-field">
+          <label>Description</label>
+          <input className="fv-input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What it's used for" />
+        </div>
+        <div className="fv-field">
+          <label>Owner</label>
+          <input className="fv-input" value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="Who's responsible for it" />
+        </div>
+        <div className="fv-field">
+          <label>Associated application (optional)</label>
+          <select className="fv-select" value={appId} onChange={(e) => setAppId(e.target.value)}>
+            <option value="">None</option>
+            {apps.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </div>
+        {isEdit && (
+          <div className="fv-field">
+            <label>Status</label>
+            <select className="fv-select" value={status} onChange={(e) => setStatus(e.target.value)}>
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </div>
+        )}
+        <div className="fv-modal-actions">
+          <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
+          <button
+            className="fv-btn"
+            disabled={!name.trim()}
+            onClick={() => (isEdit ? onSave(name.trim(), description.trim(), owner.trim(), appId, status) : onSave(name.trim(), description.trim(), owner.trim(), appId))}
+          >
+            {isEdit ? "Save changes" : "Add"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeleteServiceAccountModal({ serviceAccount, onClose, onConfirm }) {
+  return (
+    <div className="fv-modal-overlay" onClick={onClose}>
+      <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+        <h3><Trash2 size={16} />Delete {serviceAccount.name}</h3>
+        <div className="fv-modal-sub">This removes it from the registry. Recorded in the audit log.</div>
+        <div className="fv-modal-actions">
+          <button className="fv-btn fv-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="fv-btn fv-btn-danger" onClick={onConfirm}><Trash2 size={13} />Delete</button>
         </div>
       </div>
     </div>
