@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
-import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut, UserCog, ShieldCheck, ShieldOff, Building2, ListPlus, ListChecks, Bot, Laptop } from "lucide-react";
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut, UserCog, ShieldCheck, ShieldOff, Building2, ListPlus, ListChecks, Bot, Laptop, Archive, Download, Upload } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const THEME_KEY = "fvbank-theme-pref";
@@ -48,6 +48,7 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [confirmBulkOffboard, setConfirmBulkOffboard] = useState(false);
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [backupOpen, setBackupOpen] = useState(false);
   const [grantAppId, setGrantAppId] = useState("");
   const [grantLevel, setGrantLevel] = useState("");
   const [grantSelected, setGrantSelected] = useState([]);
@@ -697,6 +698,7 @@ export default function App() {
           <h1 className="fv-h1">FV Bank — Admin Access Registry</h1>
         </div>
         <div className="fv-header-right">
+          <button className="fv-btn fv-btn-ghost fv-btn-sm" onClick={() => setBackupOpen(true)} title="Back up or restore the registry"><Archive size={13} />Backup</button>
           <button className="fv-theme-toggle" onClick={toggleTheme} title={theme === "light" ? "Switch to dark theme" : "Switch to light theme"}>
             {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
           </button>
@@ -1084,6 +1086,19 @@ export default function App() {
         />
       )}
 
+      {backupOpen && (
+        <BackupModal
+          userEmail={session?.user?.email || ""}
+          onClose={() => setBackupOpen(false)}
+          onRestored={async (label, res) => {
+            await fetchAll();
+            await logAudit("Backup restored", `Registry restored from "${label}": ${res.employees} employee(s), ${res.apps} app(s), ${res.permissions} grant(s).`);
+            showToast("Backup restored");
+          }}
+          onCreated={(b) => showToast(`Backup saved \u00b7 ${b.counts.employees} employees, ${b.counts.permissions} grants`)}
+        />
+      )}
+
       {confirmBulkDelete && (
         <BulkDeleteModal
           names={employees.filter((e) => selectedIds.includes(e.id)).map((e) => e.name)}
@@ -1458,6 +1473,164 @@ function AddEmployeeModal({ departments, onClose, onAdd }) {
             Add
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// - Backup & restore -
+// A backup is a JSON copy of the whole registry. It is saved in the "backups" table and downloaded,
+// so there is always a copy outside Supabase too.
+const BACKUP_TABLES = [
+  ["apps", "name"], ["employees", "name"], ["permissions", "granted_at"], ["department_defaults", "department"],
+  ["service_accounts", "name"], ["audit_log", "ts"],
+];
+async function readAll(table, order) {
+  const out = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from(table).select("*").order(order).order("id").range(from, from + 999);
+    if (error) throw error;
+    out.push(...(data || []));
+    if (!data || data.length < 1000) return out;
+  }
+}
+function downloadJson(obj, name) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" }));
+  const a = document.createElement("a"); a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function backupFileName(iso) { return `fvbank-access-backup-${(iso || new Date().toISOString()).slice(0, 16).replace(/[T:]/g, "-")}.json`; }
+
+function BackupModal({ userEmail, onClose, onRestored, onCreated }) {
+  const [list, setList] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [confirm, setConfirm] = useState(null); // { label, data }
+  const [typed, setTyped] = useState("");
+  const fileRef = useRef(null);
+
+  async function loadList() {
+    const { data, error } = await supabase.from("backups").select("id, label, created_at, created_by, counts").order("created_at", { ascending: false }).limit(30);
+    if (error) setError(error.message); else setList(data || []);
+  }
+  useEffect(() => { loadList(); }, []);
+
+  async function createBackup() {
+    setBusy("create"); setError("");
+    try {
+      const data = { app: "fvbank-access-control", version: 1, created_at: new Date().toISOString(), created_by: userEmail };
+      for (const [t, order] of BACKUP_TABLES) data[t] = await readAll(t, order);
+      const counts = Object.fromEntries(BACKUP_TABLES.map(([t]) => [t === "permissions" ? "permissions" : t, data[t].length]));
+      const label = `Backup ${new Date().toLocaleString()}`;
+      const { error } = await supabase.from("backups").insert({ label, created_by: userEmail, counts, data });
+      if (error) throw error;
+      downloadJson(data, backupFileName(data.created_at));
+      onCreated({ label, counts });
+      await loadList();
+    } catch (e) { setError(e.message || String(e)); }
+    setBusy("");
+  }
+
+  async function downloadSaved(b) {
+    setBusy("dl-" + b.id); setError("");
+    const { data, error } = await supabase.from("backups").select("data").eq("id", b.id).single();
+    if (error) setError(error.message); else downloadJson(data.data, backupFileName(b.created_at));
+    setBusy("");
+  }
+
+  async function askRestoreSaved(b) {
+    setBusy("rs-" + b.id); setError("");
+    const { data, error } = await supabase.from("backups").select("data").eq("id", b.id).single();
+    setBusy("");
+    if (error) return setError(error.message);
+    setTyped(""); setConfirm({ label: b.label, data: data.data });
+  }
+
+  function askRestoreFile(file) {
+    if (!file) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const data = JSON.parse(r.result);
+        if (!Array.isArray(data.employees) || !Array.isArray(data.apps)) throw new Error("This file is not an FV Bank Access backup");
+        setTyped(""); setConfirm({ label: file.name, data });
+      } catch (e) { setError(e.message || "Could not read the file"); }
+    };
+    r.readAsText(file);
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  async function doRestore() {
+    setBusy("restore"); setError("");
+    // Safety copy of the current state first, so a restore can always be undone
+    try {
+      const now = { app: "fvbank-access-control", version: 1, created_at: new Date().toISOString(), created_by: userEmail };
+      for (const [t, order] of BACKUP_TABLES) now[t] = await readAll(t, order);
+      const counts = Object.fromEntries(BACKUP_TABLES.map(([t]) => [t, now[t].length]));
+      const { error: e1 } = await supabase.from("backups").insert({ label: `Automatic copy before restore (${new Date().toLocaleString()})`, created_by: userEmail, counts, data: now });
+      if (e1) throw e1;
+      const { data: res, error } = await supabase.rpc("restore_backup", { p_backup: confirm.data });
+      if (error) throw error;
+      await onRestored(confirm.label, res);
+      setConfirm(null);
+      await loadList();
+    } catch (e) { setError(e.message || String(e)); }
+    setBusy("");
+  }
+
+  const c = (b) => b.counts || {};
+  return (
+    <div className="fv-modal-overlay" onClick={busy ? undefined : onClose}>
+      <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 620 }}>
+        <h3><Archive size={16} />Backup &amp; restore</h3>
+        <div className="fv-modal-sub">
+          A backup saves employees, applications, grants, department defaults, service accounts and the audit log. It's kept here and downloaded to your computer.
+        </div>
+        {error && <div className="fv-warning-box">{error}</div>}
+
+        {confirm ? (
+          <div>
+            <div className="fv-warning-box">
+              Restore <b>{confirm.label}</b>? Employees and applications go back to how they were in that backup (deleted ones come back), and their grants become exactly the saved ones. People or apps added after it are kept. A copy of the current state is saved automatically first, so you can undo this.
+            </div>
+            <div className="fv-field">
+              <label>Type RESTORE to confirm</label>
+              <input className="fv-input" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="RESTORE" autoFocus />
+            </div>
+            <div className="fv-modal-actions">
+              <button className="fv-btn fv-btn-ghost" disabled={busy === "restore"} onClick={() => setConfirm(null)}>Cancel</button>
+              <button className="fv-btn fv-btn-danger" disabled={typed.trim().toUpperCase() !== "RESTORE" || busy === "restore"} onClick={doRestore}>
+                <RotateCcw size={13} />{busy === "restore" ? "Restoring..." : "Restore"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+              <button className="fv-btn" onClick={createBackup} disabled={!!busy}><Download size={13} />{busy === "create" ? "Creating backup..." : "Create backup now"}</button>
+              <button className="fv-btn fv-btn-ghost" onClick={() => fileRef.current?.click()} disabled={!!busy}><Upload size={13} />Restore from file</button>
+              <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: "none" }} onChange={(e) => askRestoreFile(e.target.files?.[0])} />
+            </div>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-dim)", marginBottom: 6 }}>Saved backups</div>
+            <div style={{ maxHeight: 320, overflow: "auto", border: "1px solid var(--hairline)", borderRadius: 5 }}>
+              {list === null ? <div className="fv-empty">Loading...</div> : list.length === 0 ? <div className="fv-empty">No backups yet. Create the first one.</div> : list.map((b) => (
+                <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderBottom: "1px solid var(--hairline)" }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{b.label}</div>
+                    <div style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
+                      {b.created_by || "—"} · {c(b).employees ?? "?"} employees · {c(b).apps ?? "?"} apps · {c(b).permissions ?? "?"} grants
+                    </div>
+                  </div>
+                  <button className="fv-btn fv-btn-ghost fv-btn-sm" disabled={!!busy} onClick={() => downloadSaved(b)}><Download size={12} />Download</button>
+                  <button className="fv-btn fv-btn-ghost fv-btn-sm" disabled={!!busy} onClick={() => askRestoreSaved(b)}><RotateCcw size={12} />Restore</button>
+                </div>
+              ))}
+            </div>
+            <div className="fv-modal-actions">
+              <button className="fv-btn fv-btn-ghost" onClick={onClose} disabled={!!busy}>Close</button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
