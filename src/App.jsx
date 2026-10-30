@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut, UserCog, ShieldCheck, ShieldOff, Building2, ListPlus, ListChecks, Bot } from "lucide-react";
+import { LayoutGrid, Users, ScrollText, UserPlus, UserMinus, Pencil, RotateCcw, X, Check, Boxes, Trash2, Plus, Sun, Moon, AlertTriangle, LogOut, UserCog, ShieldCheck, ShieldOff, Building2, ListPlus, ListChecks, Bot, Laptop } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
 const THEME_KEY = "fvbank-theme-pref";
@@ -84,14 +84,21 @@ export default function App() {
   }, []);
 
   const fetchAll = useCallback(async () => {
-    const [{ data: appsData }, { data: employeesData }, { data: permsData }, { data: logData }, { data: deptDefData }, { data: svcData }] = await Promise.all([
+    const [{ data: appsData }, { data: employeesData }, { data: permsData }, { data: logData }, { data: deptDefData }, { data: svcData }, { data: equipData }] = await Promise.all([
       supabase.from("apps").select("*").order("name"),
       supabase.from("employees").select("*").order("name"),
       supabase.from("permissions").select("*"),
       supabase.from("audit_log").select("*").order("ts", { ascending: false }).limit(500),
       supabase.from("department_defaults").select("*"),
       supabase.from("service_accounts").select("*").order("name"),
+      // Equipment assigned in the STRATOS inventory (mirrored, read-only here)
+      supabase.from("employee_assets").select("*").order("asset_name"),
     ]);
+    const equipByEmp = {};
+    (equipData || []).forEach((a) => {
+      if (!equipByEmp[a.employee_id]) equipByEmp[a.employee_id] = [];
+      equipByEmp[a.employee_id].push({ id: a.asset_id, name: a.asset_name, type: a.hardware_type || "", model: a.model || "", serial: a.serial || "", status: a.status || "" });
+    });
     const nextApps = (appsData || []).map((a) => ({ id: a.id, name: a.name, owner: a.owner || "Unassigned", levels: (a.levels && a.levels.length ? a.levels : ["Admin", "User"]) }));
     const permsByEmp = {};
     (permsData || []).forEach((p) => {
@@ -103,6 +110,7 @@ export default function App() {
       offboardedAt: e.offboarded_at, offboardReason: e.offboard_reason, google2fa: !!e.google_2fa_enabled,
       location: e.location || "",
       permissions: permsByEmp[e.id] || [],
+      equipment: equipByEmp[e.id] || [],
     }));
     const nextLog = (logData || []).map((l) => ({ id: l.id, ts: nowStamp(l.ts), actor: l.actor, action: l.action, detail: l.detail }));
     const nextDeptDefaults = {};
@@ -205,7 +213,8 @@ export default function App() {
     await fetchAll();
     await logAudit("Employee offboarded", `${emp.name} was offboarded${reason ? ` (reason: ${reason})` : ""}. Revoked ${revokedApps.length} grant(s): ${revokedApps.join(", ") || "none"}.`);
     setConfirmOffboard(null);
-    showToast(`${emp.name} offboarded`);
+    showToast(emp.equipment.length ? `${emp.name} offboarded · ${emp.equipment.length} device(s) released in the inventory` : `${emp.name} offboarded`);
+    if (emp.equipment.length) setTimeout(fetchAll, 2500);
   }
 
   async function handleReactivate(empId) {
@@ -259,6 +268,7 @@ export default function App() {
     setConfirmBulkOffboard(false);
     setSelectedIds([]);
     showToast(`${targets.length} employee(s) offboarded`);
+    if (targets.some((e) => e.equipment.length)) setTimeout(fetchAll, 2500);
   }
 
   async function handleBulkDelete() {
@@ -670,6 +680,12 @@ export default function App() {
           background: var(--danger-soft); border: 1px solid var(--danger); border-radius: 5px;
           padding: 12px 14px; font-size: 12.5px; color: var(--danger); line-height: 1.5; margin-bottom: 14px;
         }
+        .fv-equip-box {
+          background: var(--surface-alt, rgba(127,127,127,0.08)); border: 1px solid var(--gold); border-radius: 5px;
+          padding: 10px 12px; font-size: 12.5px; color: var(--ink); line-height: 1.5; margin-bottom: 14px;
+          display: block;
+        }
+        .fv-equip-box svg { vertical-align: -2px; margin-right: 4px; }
         .audit-entry-no { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-dim); white-space: nowrap; }
         .audit-time { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-dim); white-space: nowrap; }
         .audit-action { font-weight: 700; color: var(--ink); font-family: 'Source Serif 4', serif; font-size: 13.5px; }
@@ -804,12 +820,13 @@ export default function App() {
                 <th>Location</th>
                 <th>Status</th>
                 <th>Active grants</th>
+                <th>Equipment</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {filteredEmployees.length === 0 ? (
-                <tr><td colSpan={7} className="fv-empty">No employees match this filter.</td></tr>
+                <tr><td colSpan={8} className="fv-empty">No employees match this filter.</td></tr>
               ) : filteredEmployees.map((e) => (
                 <tr key={e.id}>
                   <td>
@@ -832,6 +849,7 @@ export default function App() {
                     </span>
                   </td>
                   <td>{e.permissions.length}</td>
+                  <td><EquipmentCell equipment={e.equipment} /></td>
                   <td>
                     {e.status === "active" ? (
                       <>
@@ -1059,6 +1077,7 @@ export default function App() {
 
       {confirmBulkOffboard && (
         <BulkOffboardModal
+          equipmentCount={employees.filter((e) => selectedIds.includes(e.id) && e.status === "active").reduce((n, e) => n + e.equipment.length, 0)}
           count={employees.filter((e) => selectedIds.includes(e.id) && e.status === "active").length}
           onClose={() => setConfirmBulkOffboard(false)}
           onConfirm={handleBulkOffboard}
@@ -1444,6 +1463,37 @@ function AddEmployeeModal({ departments, onClose, onAdd }) {
   );
 }
 
+// Equipment comes from the STRATOS inventory and is read-only here.
+function EquipmentCell({ equipment }) {
+  if (!equipment || !equipment.length) return <span style={{ color: "var(--text-dim)" }}>—</span>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }} title="Assigned in the STRATOS inventory (read-only)">
+      {equipment.map((a) => (
+        <span key={a.id} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, whiteSpace: "nowrap" }}>
+          <Laptop size={12} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
+          <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{a.name}</span>
+          {a.type && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{a.type}</span>}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function EquipmentRelease({ equipment }) {
+  if (!equipment || !equipment.length) return null;
+  return (
+    <div className="fv-equip-box">
+      <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}><Laptop size={13} />Equipment to release</div>
+      <div style={{ marginTop: 4 }}>
+        These devices are assigned to this person in the STRATOS inventory. They'll be marked <b>Spare / Available</b> there automatically, with this person kept as Previous user:
+      </div>
+      <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+        {equipment.map((a) => <li key={a.id}><span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{a.name}</span>{a.type ? ` · ${a.type}` : ""}{a.model ? ` · ${a.model}` : ""}</li>)}
+      </ul>
+    </div>
+  );
+}
+
 function OffboardModal({ employee, onClose, onConfirm }) {
   const [reason, setReason] = useState("");
   return (
@@ -1453,6 +1503,7 @@ function OffboardModal({ employee, onClose, onConfirm }) {
         <div className="fv-modal-sub">
           This will revoke their {employee.permissions.length} active grant(s) and will be recorded in the audit log. Their history isn't erased.
         </div>
+        <EquipmentRelease equipment={employee.equipment} />
         <div className="fv-field">
           <label>Reason (optional)</label>
           <select className="fv-select" value={reason} onChange={(e) => setReason(e.target.value)}>
@@ -1506,6 +1557,7 @@ function DeleteEmployeeModal({ employee, onClose, onConfirm }) {
         <div className="fv-warning-box">
           This permanently erases {employee.name}'s record and access history — it can't be undone, and unlike "Offboard", no editable history is kept. Only one audit log entry will remain, noting that {employee.name} was deleted and by whom.
         </div>
+        <EquipmentRelease equipment={employee.equipment} />
         <div className="fv-field">
           <label>Type "{employee.name}" to confirm</label>
           <input className="fv-input" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} placeholder={employee.name} />
@@ -1620,13 +1672,16 @@ function DeptDefaultsModal({ department, apps, current, onClose, onSave }) {
   );
 }
 
-function BulkOffboardModal({ count, onClose, onConfirm }) {
+function BulkOffboardModal({ count, equipmentCount = 0, onClose, onConfirm }) {
   const [reason, setReason] = useState("");
   return (
     <div className="fv-modal-overlay" onClick={onClose}>
       <div className="fv-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
         <h3><UserMinus size={16} />Offboard {count} employee(s)</h3>
         <div className="fv-modal-sub">Revokes all access for each selected active employee. Recorded in the audit log.</div>
+        {equipmentCount > 0 && (
+          <div className="fv-equip-box"><Laptop size={13} />{equipmentCount} device(s) assigned to them will be released in the STRATOS inventory (marked Spare / Available).</div>
+        )}
         <div className="fv-field">
           <label>Reason (optional)</label>
           <select className="fv-select" value={reason} onChange={(e) => setReason(e.target.value)}>
